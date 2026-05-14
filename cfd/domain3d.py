@@ -1,0 +1,149 @@
+from __future__ import annotations
+import numpy as np
+from .domain import Domain as _Domain2D
+
+
+class Domain3D:
+    """
+    3-D rectangular domain for MAC-grid NS solver.
+
+    Grid: nx × ny × nz cells.
+      p[i,j,k]   pressure at cell centre         (nx, ny, nz)
+      u[i,j,k]   x-velocity at right x-face      (nx+1, ny, nz)
+      v[i,j,k]   y-velocity at top  y-face       (nx, ny+1, nz)
+      w[i,j,k]   z-velocity at front z-face      (nx, ny, nz+1)
+
+    Ghost rows:
+      j=0, j=ny-1 are ghost y-rows in u and w (top/bottom no-slip walls).
+      k=0, k=nz-1 are ghost z-layers in u and v (front/back no-slip walls).
+
+    ASCII formats
+    -------------
+    from_ascii(map_str, params, dx, nz)
+        Extrude a single 2D cross-section uniformly in z.
+        z-faces default to no_slip.
+
+    from_ascii_layers(layers_str, params, dx)
+        Parse nz 2D ASCII maps separated by '===' lines.
+        Each map defines one z-layer (k=0 = first map in string).
+        Same symbol table as Domain.from_ascii: '#' no-slip, '-' lid,
+        '>' inlet, '<' outlet, '*' solid, ' '/'.' fluid.
+    """
+
+    def __init__(
+        self,
+        nx: int, ny: int, nz: int,
+        dx: float, dy: float, dz: float,
+        solid: np.ndarray,     # (nx, ny, nz) bool
+        bc_type: dict,         # 'left'/'right'/'bottom'/'top'/'front'/'back'
+        bc_values: dict,
+    ) -> None:
+        self.nx, self.ny, self.nz = nx, ny, nz
+        self.dx, self.dy, self.dz = dx, dy, dz
+        self.solid     = solid.astype(bool)
+        self.bc_type   = bc_type
+        self.bc_values = bc_values
+
+        # ML input encoding maps (nx, ny, nz)
+        self.inlet_u_map = np.zeros((nx, ny, nz), dtype=np.float32)
+        self.lid_u_map   = np.zeros((nx, ny, nz), dtype=np.float32)
+        u_in  = float(bc_values.get('inlet_u', 0.0))
+        lid_u = float(bc_values.get('lid_u',   0.0))
+        if bc_type.get('left')   == 'inlet': self.inlet_u_map[0,  :, :] = u_in
+        if bc_type.get('top')    == 'lid':   self.lid_u_map[:,  -1, :] = lid_u
+        if bc_type.get('bottom') == 'lid':   self.lid_u_map[:,   0, :] = lid_u
+
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_ascii(
+        cls,
+        map_str: str,
+        params:  dict,
+        dx:      float = 1.0,
+        dy:      float | None = None,
+        dz:      float | None = None,
+        nz:      int   = 16,
+    ) -> 'Domain3D':
+        """
+        Extrude a 2D ASCII cross-section uniformly in z.
+
+        The 2D map uses the same symbol table as Domain.from_ascii:
+          '#'  no-slip wall      '-'  moving lid
+          '>'  inlet (left)      '<'  outlet (right)
+          '*'  solid obstacle    ' '/'.'  fluid cell
+
+        Front (z=0) and back (z=D) faces default to no_slip.
+        """
+        d2 = _Domain2D.from_ascii(map_str, params, dx=dx, dy=dy or dx)
+        solid3d = np.repeat(d2.solid[:, :, np.newaxis], nz, axis=2)
+        bc_type = dict(d2.bc_type)
+        bc_type.setdefault('front', 'no_slip')
+        bc_type.setdefault('back',  'no_slip')
+        return cls(d2.nx, d2.ny, nz, d2.dx, d2.dy, dz or dx,
+                   solid3d, bc_type, dict(params))
+
+    @classmethod
+    def from_ascii_layers(
+        cls,
+        layers_str: str,
+        params:     dict,
+        dx:         float = 1.0,
+        dy:         float | None = None,
+        dz:         float | None = None,
+    ) -> 'Domain3D':
+        """
+        Parse nz 2D ASCII layers separated by '===' lines.
+
+        Each layer uses the 2D symbol table. The first layer in the string
+        corresponds to k=0 (front face / low z). All layers must have the
+        same nx and ny; the x/y BC type is taken from the first layer.
+        """
+        layer_strs = [s.strip() for s in layers_str.split('===') if s.strip()]
+        if not layer_strs:
+            raise ValueError("No layers found in ASCII map string")
+        ds = [_Domain2D.from_ascii(ls, params, dx=dx, dy=dy or dx)
+              for ls in layer_strs]
+        solid3d = np.stack([d.solid for d in ds], axis=2)  # (nx, ny, nz)
+        bc_type = dict(ds[0].bc_type)
+        bc_type.setdefault('front', 'no_slip')
+        bc_type.setdefault('back',  'no_slip')
+        return cls(ds[0].nx, ds[0].ny, len(ds), ds[0].dx, ds[0].dy, dz or dx,
+                   solid3d, bc_type, dict(params))
+
+    @classmethod
+    def closed(
+        cls,
+        nx: int, ny: int, nz: int,
+        dx: float = 1.0,
+        dy: float | None = None,
+        dz: float | None = None,
+        params: dict | None = None,
+    ) -> 'Domain3D':
+        """All-wall closed box. Top face (y=ny-1) is a moving lid (+x)."""
+        bc_type = {
+            'left':   'no_slip', 'right':  'no_slip',
+            'bottom': 'no_slip', 'top':    'lid',
+            'front':  'no_slip', 'back':   'no_slip',
+        }
+        return cls(nx, ny, nz, dx, dy or dx, dz or dx,
+                   np.zeros((nx, ny, nz), dtype=bool),
+                   bc_type, params or {})
+
+    @classmethod
+    def channel(
+        cls,
+        nx: int, ny: int, nz: int,
+        dx: float = 1.0,
+        dy: float | None = None,
+        dz: float | None = None,
+        params: dict | None = None,
+    ) -> 'Domain3D':
+        """Inlet (+x) on left, outlet on right; all other faces no-slip."""
+        bc_type = {
+            'left':   'inlet',   'right':  'outlet',
+            'bottom': 'no_slip', 'top':    'no_slip',
+            'front':  'no_slip', 'back':   'no_slip',
+        }
+        return cls(nx, ny, nz, dx, dy or dx, dz or dx,
+                   np.zeros((nx, ny, nz), dtype=bool),
+                   bc_type, params or {})
