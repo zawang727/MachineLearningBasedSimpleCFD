@@ -2,9 +2,13 @@
 Generate 3-D CFD training dataset.
 
 Saves a .npz file with:
-  inputs  (N, 3, nz, ny, nx)  — solid mask, inlet_u map, lid_u map
+  inputs  (N, 6, nz, ny, nx)  — solid, inlet_u, lid_u, dx/Lx, dy/Ly, dz/Lz
   outputs (N, 4, nz, ny, nx)  — u_cell, v_cell, w_cell, pressure
   meta    (N,)                 — JSON string per sample
+
+Channels 3-5 are per-cell spacings normalised by total domain length so the
+3-D surrogate can resolve stretched grids; on a uniform mesh they collapse
+to constant maps of 1/nx, 1/ny, 1/nz.
 
 Run:
     python generate_data3d.py --n-per-case 2 --output data3d.npz
@@ -20,14 +24,24 @@ NX_DEFAULT = 32
 NY_DEFAULT = 32
 NZ_DEFAULT = 32
 
+INPUT_CHANNELS = 6     # solid, inlet_u, lid_u, dx/Lx, dy/Ly, dz/Lz
+
 
 def _encode_input(domain) -> np.ndarray:
-    """(3, nz, ny, nx) float32 — solid, inlet_u, lid_u."""
+    """(6, nz, ny, nx) float32 — solid, inlet_u, lid_u, dx/Lx, dy/Ly, dz/Lz."""
+    nx, ny, nz = domain.nx, domain.ny, domain.nz
     solid   = domain.solid.astype(np.float32)          # (nx, ny, nz)
     inlet_u = domain.inlet_u_map.astype(np.float32)
     lid_u   = domain.lid_u_map.astype(np.float32)
-    # Transpose (nx, ny, nz) → (nz, ny, nx) for CNN (channel last = x)
-    return np.stack([solid.T, inlet_u.T, lid_u.T], axis=0)  # (3, nz, ny, nx)
+    # Per-cell spacings normalised by domain length.
+    dx_norm = (domain.dx_arr / domain.Lx).astype(np.float32)        # (nx,)
+    dy_norm = (domain.dy_arr / domain.Ly).astype(np.float32)        # (ny,)
+    dz_norm = (domain.dz_arr / domain.Lz).astype(np.float32)        # (nz,)
+    # Broadcast each to (nz, ny, nx) — CNN convention has fastest axis = x.
+    dx_map = np.broadcast_to(dx_norm[None, None, :], (nz, ny, nx)).copy()
+    dy_map = np.broadcast_to(dy_norm[None, :, None], (nz, ny, nx)).copy()
+    dz_map = np.broadcast_to(dz_norm[:, None, None], (nz, ny, nx)).copy()
+    return np.stack([solid.T, inlet_u.T, lid_u.T, dx_map, dy_map, dz_map], axis=0)
 
 
 def _encode_output(state) -> np.ndarray:
@@ -50,14 +64,25 @@ def generate(
     os.makedirs(out_dir, exist_ok=True)
     all_in, all_out, all_meta = [], [], []
 
+    def _record(state, case_name, extra=None):
+        meta_obj = {
+            'case': case_name,
+            'Lx':   float(state.domain.Lx),
+            'Ly':   float(state.domain.Ly),
+            'Lz':   float(state.domain.Lz),
+        }
+        if extra:
+            meta_obj.update(extra)
+        all_in.append(_encode_input(state.domain))
+        all_out.append(_encode_output(state))
+        all_meta.append(json.dumps(meta_obj))
+
     Re_cavity = [100, 400, 1000]
     for Re in Re_cavity[:n_per_case]:
         print(f"\n[3D generate] Lid-driven cavity  Re={Re}")
         state = lid_driven_cavity_3d.run(
             Re=Re, nx=nx, ny=ny, nz=nz, out_dir=out_dir, quiet=True)
-        all_in.append(_encode_input(state.domain))
-        all_out.append(_encode_output(state))
-        all_meta.append(json.dumps({'case': 'lid_driven_cavity_3d', 'Re': Re}))
+        _record(state, 'lid_driven_cavity_3d', {'Re': Re})
 
     Re_channel = [50, 100, 200]
     ny_ch = max(8, ny // 2)
@@ -66,11 +91,8 @@ def generate(
         print(f"\n[3D generate] Channel flow  Re={Re}")
         state, _ = channel_flow_3d.run(
             Re=Re, nx=nx, ny=ny_ch, nz=nz_ch, out_dir=out_dir, quiet=True)
-        # Resample to standard grid
         state = _resample_state3d(state, nx, ny, nz)
-        all_in.append(_encode_input(state.domain))
-        all_out.append(_encode_output(state))
-        all_meta.append(json.dumps({'case': 'channel_flow_3d', 'Re': Re}))
+        _record(state, 'channel_flow_3d', {'Re': Re})
 
     inputs  = np.stack(all_in,  axis=0)
     outputs = np.stack(all_out, axis=0)

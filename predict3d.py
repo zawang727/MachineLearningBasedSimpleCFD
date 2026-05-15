@@ -52,19 +52,35 @@ def _tensor_to_flowstate3d(tensor: np.ndarray, domain: Domain3D) -> FlowState3D:
 
 def _decode_domain3d(input_tensor: np.ndarray, meta_str: str,
                      nx: int, ny: int, nz: int) -> Domain3D:
-    """Reconstruct a minimal Domain3D from the input encoding + metadata."""
+    """Reconstruct a minimal Domain3D from the input encoding + metadata.
+
+    Input channels: 0=solid, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly, 5=dz/Lz.
+    """
     meta = json.loads(meta_str)
     case = meta.get('case', 'unknown')
     Re   = meta.get('Re', 100.0)
+    Lx   = float(meta.get('Lx', 1.0))
+    Ly   = float(meta.get('Ly', 1.0))
+    Lz   = float(meta.get('Lz', 1.0))
 
     # input channels in (nz, ny, nx) → transpose to (nx, ny, nz)
     solid     = input_tensor[0].T > 0.5
     inlet_u_val = float(input_tensor[1].max())
     lid_u_val   = float(input_tensor[2].max())
 
-    dx = 1.0 / nx
-    dy = 1.0 / ny
-    dz = 1.0 / nz
+    if input_tensor.shape[0] >= 6:
+        # Each spacing channel is broadcast across two axes; sample one row /
+        # column / pillar to recover the underlying 1-D arrays.
+        dx_norm = input_tensor[3][0, 0, :].astype(np.float32)   # (nx,)
+        dy_norm = input_tensor[4][0, :, 0].astype(np.float32)   # (ny,)
+        dz_norm = input_tensor[5][:, 0, 0].astype(np.float32)   # (nz,)
+        dx = dx_norm * Lx
+        dy = dy_norm * Ly
+        dz = dz_norm * Lz
+    else:
+        dx = Lx / nx
+        dy = Ly / ny
+        dz = Lz / nz
 
     if case == 'lid_driven_cavity_3d':
         bc_type = {
@@ -116,13 +132,14 @@ def predict(
     scales = np.load(scales_path)   # (1, 4, 1, 1, 1)
     scales = scales.reshape(4)      # (4,) for broadcast
 
-    model = load_model_3d(model_path, base_ch)
-    model.eval()
-
     d = np.load(data_path, allow_pickle=True)
-    X    = d['inputs']    # (N, 3, nz, ny, nx)
+    X    = d['inputs']    # (N, in_ch, nz, ny, nx)
     y    = d['outputs']   # (N, 4, nz, ny, nx)
     meta = d['meta']
+
+    in_channels = X.shape[1]
+    model = load_model_3d(model_path, base_ch, in_channels=in_channels)
+    model.eval()
 
     n = len(X)
     split = max(1, int(n * train_frac))

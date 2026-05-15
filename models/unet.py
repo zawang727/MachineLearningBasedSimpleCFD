@@ -24,27 +24,29 @@ class CFDUNet(nn.Module):
     """
     Lightweight U-Net surrogate for 2-D steady-state flow prediction.
 
-    Input  (B, 3, ny, nx):
-      Ch 0  obstacle mask       (1 = solid, 0 = fluid)
-      Ch 1  inlet BC map        (u_inlet where inlet face, else 0)
-      Ch 2  lid / wall BC map   (lid_u on lid row, else 0)
+    Input  (B, in_ch, ny, nx):
+      Default (in_ch=5, mesh-aware):
+        Ch 0  obstacle mask       (1 = solid, 0 = fluid)
+        Ch 1  inlet BC map        (u_inlet where inlet face, else 0)
+        Ch 2  lid / wall BC map   (lid_u on lid row, else 0)
+        Ch 3  dx / Lx             (per-cell width normalised by domain length)
+        Ch 4  dy / Ly
 
     Output (B, 3, ny, nx):
       Ch 0  u_cell  (cell-centre x-velocity)
       Ch 1  v_cell  (cell-centre y-velocity)
       Ch 2  p       (pressure)
-
-    ~55K parameters at base_ch=16.
     """
 
-    def __init__(self, base_ch: int = 16) -> None:
+    def __init__(self, base_ch: int = 16, in_channels: int = 5) -> None:
         super().__init__()
         c = base_ch
+        self.in_channels = in_channels
 
         # Encoder
-        self.enc1 = _ConvBlock(3,   c)
-        self.enc2 = _ConvBlock(c,   c * 2)
-        self.enc3 = _ConvBlock(c*2, c * 4)
+        self.enc1 = _ConvBlock(in_channels, c)
+        self.enc2 = _ConvBlock(c,           c * 2)
+        self.enc3 = _ConvBlock(c * 2,       c * 4)
 
         self.pool = nn.MaxPool2d(2)
 
@@ -77,8 +79,8 @@ class CFDUNet(nn.Module):
         return self.head(d1)
 
 
-def build_model(base_ch: int = 16) -> CFDUNet:
-    return CFDUNet(base_ch)
+def build_model(base_ch: int = 16, in_channels: int = 5) -> CFDUNet:
+    return CFDUNet(base_ch, in_channels)
 
 
 def save_model(model: CFDUNet, path: str) -> None:
@@ -86,8 +88,8 @@ def save_model(model: CFDUNet, path: str) -> None:
     print(f"Model saved to {path}")
 
 
-def load_model(path: str, base_ch: int = 16) -> CFDUNet:
-    model = CFDUNet(base_ch)
+def load_model(path: str, base_ch: int = 16, in_channels: int = 5) -> CFDUNet:
+    model = CFDUNet(base_ch, in_channels)
     model.load_state_dict(torch.load(path, map_location='cpu'))
     model.eval()
     print(f"Model loaded from {path}")

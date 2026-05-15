@@ -36,14 +36,30 @@ def _tensor_to_flowstate(tensor: np.ndarray, domain: Domain) -> FlowState:
 
 def _decode_domain(input_tensor: np.ndarray, meta_str: str,
                    nx: int, ny: int) -> Domain:
-    """Reconstruct a minimal Domain from the input encoding + metadata."""
+    """Reconstruct a minimal Domain from the input encoding + metadata.
+
+    Input channels: 0=solid, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly.
+    """
     meta = json.loads(meta_str)
     case = meta.get('case', 'unknown')
     Re   = meta.get('Re', 100.0)
+    Lx   = float(meta.get('Lx', 1.0))
+    Ly   = float(meta.get('Ly', 1.0))
 
     solid = input_tensor[0].T > 0.5   # (nx, ny)
     inlet_u_val = float(input_tensor[1].max())
     lid_u_val   = float(input_tensor[2].max())
+
+    # Per-cell spacings — channels 3-4 are broadcast in (ny, nx), so any row
+    # / column slice recovers the underlying 1-D arrays.
+    if input_tensor.shape[0] >= 5:
+        dx_norm = input_tensor[3][0, :].astype(np.float32)  # (nx,)
+        dy_norm = input_tensor[4][:, 0].astype(np.float32)  # (ny,)
+        dx_arr  = dx_norm * Lx
+        dy_arr  = dy_norm * Ly
+    else:
+        dx_arr  = Lx / nx
+        dy_arr  = Ly / ny
 
     if case == 'lid_driven_cavity':
         bc_type = {'left': 'no_slip', 'right': 'no_slip',
@@ -58,7 +74,7 @@ def _decode_domain(input_tensor: np.ndarray, meta_str: str,
                    'bottom': 'no_slip', 'top': 'no_slip'}
         bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
 
-    return Domain(nx=nx, ny=ny, dx=1.0/nx, dy=1.0/ny,
+    return Domain(nx=nx, ny=ny, dx=dx_arr, dy=dy_arr,
                   solid=solid, bc_type=bc_type, bc_values=bc_values)
 
 
@@ -73,13 +89,15 @@ def predict(
     os.makedirs(out_dir, exist_ok=True)
 
     scales = np.load(model_path.replace('.pt', '_scales.npy'))
-    model  = load_model(model_path, base_ch)
-    model.eval()
 
     d = np.load(data_path, allow_pickle=True)
-    X    = d['inputs']    # (N, 3, ny, nx)
+    X    = d['inputs']    # (N, in_ch, ny, nx)
     y    = d['outputs']   # (N, 3, ny, nx)
     meta = d['meta']
+
+    in_channels = X.shape[1]
+    model  = load_model(model_path, base_ch, in_channels=in_channels)
+    model.eval()
 
     n = len(X)
     split = max(1, int(n * train_frac))

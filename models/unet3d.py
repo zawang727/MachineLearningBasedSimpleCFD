@@ -24,10 +24,14 @@ class CFDUNet3D(nn.Module):
     """
     Lightweight 3-D U-Net surrogate for steady-state flow prediction.
 
-    Input  (B, 3, nz, ny, nx):
-      Ch 0  obstacle mask       (1 = solid, 0 = fluid)
-      Ch 1  inlet BC map        (u_inlet where inlet face, else 0)
-      Ch 2  lid / wall BC map   (lid_u on lid layer, else 0)
+    Input  (B, in_ch, nz, ny, nx):
+      Default (in_ch=6, mesh-aware):
+        Ch 0  obstacle mask       (1 = solid, 0 = fluid)
+        Ch 1  inlet BC map        (u_inlet where inlet face, else 0)
+        Ch 2  lid / wall BC map   (lid_u on lid layer, else 0)
+        Ch 3  dx / Lx             (per-cell width normalised)
+        Ch 4  dy / Ly
+        Ch 5  dz / Lz
 
     Output (B, 4, nz, ny, nx):
       Ch 0  u_cell  (cell-centre x-velocity)
@@ -39,11 +43,12 @@ class CFDUNet3D(nn.Module):
     base_ch=16 → ~1.5M params  (suitable for 64^3 grids, needs ≥4 GB RAM)
     """
 
-    def __init__(self, base_ch: int = 8) -> None:
+    def __init__(self, base_ch: int = 8, in_channels: int = 6) -> None:
         super().__init__()
         c = base_ch
+        self.in_channels = in_channels
 
-        self.enc1 = _ConvBlock3D(3,    c)
+        self.enc1 = _ConvBlock3D(in_channels, c)
         self.enc2 = _ConvBlock3D(c,    c * 2)
         self.pool = nn.MaxPool3d(2)
         self.bot  = _ConvBlock3D(c * 2, c * 4)
@@ -66,8 +71,8 @@ class CFDUNet3D(nn.Module):
         return self.head(d1)
 
 
-def build_model_3d(base_ch: int = 8) -> CFDUNet3D:
-    return CFDUNet3D(base_ch)
+def build_model_3d(base_ch: int = 8, in_channels: int = 6) -> CFDUNet3D:
+    return CFDUNet3D(base_ch, in_channels)
 
 
 def save_model_3d(model: CFDUNet3D, path: str) -> None:
@@ -75,8 +80,8 @@ def save_model_3d(model: CFDUNet3D, path: str) -> None:
     print(f"3D model saved to {path}")
 
 
-def load_model_3d(path: str, base_ch: int = 8) -> CFDUNet3D:
-    model = CFDUNet3D(base_ch)
+def load_model_3d(path: str, base_ch: int = 8, in_channels: int = 6) -> CFDUNet3D:
+    model = CFDUNet3D(base_ch, in_channels)
     model.load_state_dict(torch.load(path, map_location='cpu'))
     model.eval()
     print(f"3D model loaded from {path}")
