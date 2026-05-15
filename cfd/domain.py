@@ -151,16 +151,26 @@ class Domain:
         nx: int, ny: int,
         dx: 'float | np.ndarray',
         dy: 'float | np.ndarray',
-        solid:     np.ndarray,    # (nx, ny) bool
+        solid:     np.ndarray,    # (nx, ny) bool or float-in-[0,1]
         bc_type:   dict,          # 'left'/'right'/'top'/'bottom' → str
         bc_values: dict,          # 'inlet_u', 'inlet_v', 'lid_u', ...
     ) -> None:
         self.nx, self.ny   = nx, ny
         self.dx_arr        = _as_spacing(dx, nx, 'dx')   # (nx,)
         self.dy_arr        = _as_spacing(dy, ny, 'dy')   # (ny,)
-        self.dx            = _scalar_summary(self.dx_arr)  # scalar accessor
+        self.dx            = _scalar_summary(self.dx_arr)
         self.dy            = _scalar_summary(self.dy_arr)
-        self.solid         = solid.astype(bool)
+        # `solid` accepts either a boolean hard mask or a float volume
+        # fraction χ ∈ [0, 1].  We store both: `solid` (hard, used by
+        # _mask_solid and Poisson Dirichlet at χ ≥ ½) and `chi` (float,
+        # used by the solver's volume-penalisation step).
+        solid_arr = np.asarray(solid)
+        if solid_arr.dtype == bool:
+            self.chi   = solid_arr.astype(np.float32)
+            self.solid = solid_arr
+        else:
+            self.chi   = solid_arr.astype(np.float32).clip(0.0, 1.0)
+            self.solid = (self.chi >= 0.5)
         self.bc_type       = bc_type
         self.bc_values     = bc_values
 
@@ -285,12 +295,27 @@ class Domain:
             xc = 0.5 * (xf[:-1] + xf[1:])
             yc = 0.5 * (yf[:-1] + yf[1:])
             X, Y = np.meshgrid(xc, yc, indexing='ij')          # (nx, ny)
-            for shape in shapes:
-                mask = shape.inside(X, Y)
-                if shape.kind == 'solid':
-                    solid = solid | mask
-                else:    # 'fluid' — carve out
-                    solid = solid & ~mask
+            h_min = float(min(dx_arr.min(), dy_arr.min()))
+
+            any_smooth = any(getattr(s, 'epsilon', 0.0) > 0 for s in shapes)
+            if any_smooth:
+                # Build a continuous χ field: ASCII solid cells start at 1,
+                # each shape adds (or carves) via max / min.
+                chi_field = solid.astype(np.float32)
+                for shape in shapes:
+                    field = shape.chi_at(X, Y, h_min)
+                    if shape.kind == 'solid':
+                        chi_field = np.maximum(chi_field, field)
+                    else:
+                        chi_field = np.minimum(chi_field, 1.0 - field)
+                solid = chi_field      # constructor accepts float χ
+            else:
+                for shape in shapes:
+                    mask = shape.inside(X, Y)
+                    if shape.kind == 'solid':
+                        solid = solid | mask
+                    else:
+                        solid = solid & ~mask
 
         return cls(nx, ny, dx_arr, dy_arr, solid, bc_type, params)
 

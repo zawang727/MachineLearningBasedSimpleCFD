@@ -21,7 +21,7 @@ Ly:      1.0
 x_axis:  uniform
 y_axis:  uniform
 
-shape:   circle cx=0.8 cy=0.5 r=0.1   # D = 0.2, ~5 cells radius at ny=24
+shape:   circle cx=0.8 cy=0.5 r=0.1 epsilon=2   # D=0.2; smooth ~2-cell wall
 
 ---
 ##############################################################################

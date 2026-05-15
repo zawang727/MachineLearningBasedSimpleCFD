@@ -77,10 +77,24 @@ shape: circle cx=0.8 cy=0.5 r=0.15
 shape: rect   x0=1.5 x1=1.8 y0=0.3 y1=0.7 solid
 ```
 
-See `cases/cylinder_flow.cfd` for a flow-past-cylinder example.  This is
-the Phase-2 entry point: walls are stair-stepped (first-order in space).
-True cut-cell or smooth penalization for curved walls is the next
-Phase-2 commit.
+Append `epsilon=N` to a shape spec to get a tanh-smoothed wall that spans
+~2·N cells across the interface:
+
+```
+shape: circle cx=0.8 cy=0.5 r=0.15 epsilon=2
+```
+
+The solver then applies **volume penalisation** at each substep
+(`u ← (1 − χ) · u` at every face), which smoothly drives velocity to
+zero through the cut cells.  With `epsilon=0` (default) the χ field is
+binary and the penalisation collapses to the existing hard-mask
+behaviour — uniform cases produce byte-identical numbers.  See
+`cases/cylinder_flow.cfd` for a Re=40 cylinder-in-channel example;
+turning smoothing on resolves the recirculation eddies behind the
+cylinder that the stair-stepped wall smears out.
+
+True second-order cut-cell with face-area fractions is still ahead in
+Phase 2.
 
 A file with no `---` separator is parsed as a plain ASCII map with all
 defaults — preserves the legacy embedded-string layout.

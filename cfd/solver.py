@@ -137,6 +137,26 @@ class Solver:
         self._dx_pcorr    = 0.5 * (dx_arr[:-1] + dx_arr[1:])   # (nx-1,)
         self._dy_pcorr    = 0.5 * (dy_arr[:-1] + dy_arr[1:])   # (ny-1,)
 
+        # --- volume-penalisation: chi interpolated to u / v faces ---
+        # chi ∈ [0, 1] at cell centres; faces between cells get the mean.
+        # On boundary faces (i=0,nx in u; j=0,ny in v) we copy the adjacent
+        # cell — the wall BC there is enforced separately by _apply_bc.
+        chi = self.domain.chi.astype(np.float32)
+        chi_u_face = np.empty((self.domain.nx + 1, self.domain.ny), dtype=np.float32)
+        chi_u_face[1:-1, :] = 0.5 * (chi[:-1, :] + chi[1:, :])
+        chi_u_face[0,    :] = chi[0,  :]
+        chi_u_face[-1,   :] = chi[-1, :]
+        chi_v_face = np.empty((self.domain.nx, self.domain.ny + 1), dtype=np.float32)
+        chi_v_face[:, 1:-1] = 0.5 * (chi[:, :-1] + chi[:, 1:])
+        chi_v_face[:, 0   ] = chi[:, 0]
+        chi_v_face[:, -1  ] = chi[:, -1]
+        # Pre-compute the survival factor (1 - chi) so the hot loop only does
+        # one multiply per face.
+        self._u_survive = (1.0 - chi_u_face).astype(np.float64)
+        self._v_survive = (1.0 - chi_v_face).astype(np.float64)
+        self._has_penalisation = bool(np.any(self._u_survive < 1.0) or
+                                       np.any(self._v_survive < 1.0))
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -165,15 +185,31 @@ class Solver:
         u_star, v_star = self._advect_diffuse()
         self._apply_bc(u_star, v_star)
         self._mask_solid(u_star, v_star)
+        self._penalise(u_star, v_star)
 
         p_new = self._solve_pressure(u_star, v_star)
         u_new, v_new = self._correct_velocity(u_star, v_star, p_new)
         self._apply_bc(u_new, v_new)
         self._mask_solid(u_new, v_new)
+        self._penalise(u_new, v_new)
 
         self.u[:] = u_new
         self.v[:] = v_new
         self.p[:] = p_new
+
+    def _penalise(self, u: np.ndarray, v: np.ndarray) -> None:
+        """
+        Volume penalisation: u ← (1 − χ) · u at every face.
+
+        Hard binary χ collapses to the same behaviour as `_mask_solid`
+        (which already zeroed velocity in solid cells, so the multiply is
+        a no-op there); fractional χ smoothly damps velocity inside cut
+        cells, giving sub-cell-accurate walls for shape-defined geometry.
+        """
+        if not self._has_penalisation:
+            return
+        u *= self._u_survive
+        v *= self._v_survive
 
     # ------------------------------------------------------------------ #
     # Advection + diffusion
