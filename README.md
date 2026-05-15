@@ -169,3 +169,85 @@ Requires Python 3.9+. No GPU required (solver and training both work on CPU).
 - [ ] Phase 3: 3D extension (3D lid-driven cavity, 3D channel)
 - [ ] Phase 4: Physics-informed loss (divergence-free constraint)
 - [ ] Phase 5: Interactive web demo
+
+## Meshing Roadmap
+
+Today the solver lives on a uniform Cartesian MAC grid: pressure at cell
+centres, velocities at faces, scalar `dx, dy, dz`. That covers all current
+test cases (cavity, channel, square block) but excludes curved walls,
+near-wall refinement, and CAD-style geometry. The plan below grows the
+mesh capability in four stages of increasing scope. Each stage builds on
+the previous one; the CNN surrogate survives stages 1–2 but breaks at
+stage 3.
+
+### Stage 1 — Non-uniform structured grid
+Keep the `(nx, ny, nz)` MAC layout, but replace scalar spacings with per-axis
+arrays `dx[i], dy[j], dz[k]`. Stencils become spacing-aware; the pressure
+Laplacian stays tri-diagonal per axis with variable coefficients. Enables
+near-wall clustering (boundary layers) and far-field stretching.
+
+- **ASCII format**: add a header that declares stretching, e.g.
+  ```
+  axes: x=uniform(0,1,nx=64) y=tanh(0,1,ny=48,ratio=4)
+  ```
+  followed by the existing cell map.
+- **Solver changes**: `domain.dx → domain.dx[:]`; refactor stencils in
+  `solver.py` / `solver3d.py` to use local `dx[i]` / `dy[j]` / `dz[k]`.
+- **ML pipeline**: still works — CNN sees regular `(nz, ny, nx)` tensors;
+  add `dx/dy/dz` arrays as extra input channels or metadata.
+- **Cost**: ~1–2 weeks. Existing tests still apply.
+
+### Stage 2 — Cut-cell / immersed boundary on Cartesian
+Each cell carries a fluid volume fraction `α_v ∈ [0,1]` and per-face open-area
+fractions. Curved geometry is represented by a signed-distance field or a
+boundary polyline; the underlying grid stays uniform Cartesian. This is the
+approach used by AMR codes (Basilisk, AMReX) for airfoils, cylinders, hulls.
+
+- **ASCII format**: extend with geometric primitives or an SDF, e.g.
+  ```
+  shape: circle cx=0.5 cy=0.5 r=0.2 solid
+  shape: polyline (0.1,0.4)(0.3,0.5)(0.5,0.4) wall
+  ```
+  Or accept a separate `.sdf` / image file as the boundary.
+- **Solver changes**: face fluxes scaled by open-area fraction; wall flux
+  via a cut-face boundary term. Small-cell timestep restrictions need
+  mitigation (cell-merging or flux redistribution).
+- **ML pipeline**: still works — `α_v` and the SDF become additional CNN
+  input channels.
+- **Cost**: ~3–4 weeks. Adds new test cases (flow over cylinder, NACA).
+
+### Stage 3 — Unstructured finite-volume (hex / tetra / mixed)
+The architectural break. Replace `(nx, ny, nz)` arrays with cell, face, and
+node tables. Fluxes are computed face-by-face. Pressure projection becomes
+a general sparse system (CG + algebraic multigrid, not LU).
+
+- **Mesh format**: adopt Gmsh `.msh` or VTK legacy `.vtk` rather than
+  inventing a format. Optionally keep a thin ASCII generator for simple
+  built-in cases (channels, ducts) that emits `.msh` under the hood.
+- **Solver changes**: full rewrite — MAC layout no longer applies. Choose
+  one of:
+  - Collocated FV with Rhie–Chow interpolation (simpler), or
+  - Face-staggered unstructured (closer in spirit to current MAC).
+- **ML pipeline**: CNN dies. Options:
+  - Graph neural network on the mesh (MeshGraphNets style).
+  - Interpolate fields onto a background Cartesian grid for the surrogate
+    only — keeps the U-Net usable as a coarse predictor.
+- **Cost**: ~2–3 months. Effectively a new codebase sharing the same repo.
+
+### Stage 4 — Mesh adaptivity (AMR)
+Refinement criteria drive on-the-fly mesh changes. Only worth doing after
+stage 3 is solid; relies on the same unstructured data structures plus
+refine/coarsen operators and load balancing.
+
+### Where the cliff is
+Stage 3 ends the CNN surrogate path. If the ML pipeline is core to the
+project's value, stage 2 (cut-cell on Cartesian) covers most "curved
+geometry" use cases — cylinders, airfoils, organic shapes — while keeping
+the U-Net training feasible. Pick stage 3 only if you need true arbitrary
+geometry (CAD imports, complex internal passages).
+
+### Suggested entry point
+Stage 1. It is small enough to validate against the existing cavity /
+channel / block cases (refining near the lid should converge faster and
+match Ghia at lower `nx`). After that, the choice between stage 2 and
+stage 3 follows from which geometries you actually want to simulate.
