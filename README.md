@@ -67,6 +67,21 @@ Stretching specs:
 - `tanh beta=2.5` — double-sided tanh clustering; larger β = tighter wall layers.
 - `list 0.02 0.03 0.04 ...` — explicit cell widths (must sum to `Lx`/`Ly`).
 
+**Geometric primitives** can be added with one or more `shape:` lines in
+the header.  Cells whose centres land inside the shape become solid (or
+fluid, if the trailing keyword is `fluid`).  Stacks additively on top of
+any ASCII-encoded geometry.
+
+```
+shape: circle cx=0.8 cy=0.5 r=0.15
+shape: rect   x0=1.5 x1=1.8 y0=0.3 y1=0.7 solid
+```
+
+See `cases/cylinder_flow.cfd` for a flow-past-cylinder example.  This is
+the Phase-2 entry point: walls are stair-stepped (first-order in space).
+True cut-cell or smooth penalization for curved walls is the next
+Phase-2 commit.
+
 A file with no `---` separator is parsed as a plain ASCII map with all
 defaults — preserves the legacy embedded-string layout.
 

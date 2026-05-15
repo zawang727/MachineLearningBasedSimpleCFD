@@ -1,0 +1,52 @@
+# Flow past a 2-D circular cylinder in a channel, Re = 40 (steady wake).
+#
+#   Re = U_inf · D / nu  =  1.0 · 0.2 / 0.005  =  40
+#
+# At Re=40 the wake is a stable pair of counter-rotating recirculation
+# bubbles behind the cylinder; at Re≈47 it transitions to vortex
+# shedding (Kármán street).
+#
+# Geometry note: cells whose centres land inside the circle become solid.
+# That's a stair-stepped approximation of the curved wall — adequate to
+# see the recirculation pattern but quantitatively coarse at this grid.
+# Run:
+#   python cases/run.py cases/cylinder_flow.cfd --duration 30
+
+rho:     1.0
+nu:      0.005          # Re = 40 with U_inf=1 and D=0.2
+inlet_u: 1.0
+
+Lx:      4.0
+Ly:      1.0
+x_axis:  uniform
+y_axis:  uniform
+
+shape:   circle cx=0.8 cy=0.5 r=0.1   # D = 0.2, ~5 cells radius at ny=24
+
+---
+##############################################################################
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+##############################################################################

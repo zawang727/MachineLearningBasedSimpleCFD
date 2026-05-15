@@ -1,6 +1,8 @@
 from __future__ import annotations
 import numpy as np
 
+from .shapes import Shape, parse_shape_spec
+
 _EDGE_BC = {
     '#': 'no_slip',
     '-': 'lid',
@@ -253,6 +255,7 @@ class Domain:
         Lx, Ly = 1.0, 1.0
         x_axis = 'uniform'
         y_axis = 'uniform'
+        shapes: list[Shape] = []
 
         for raw in header_text.splitlines():
             line = raw.split('#', 1)[0].strip()
@@ -268,12 +271,27 @@ class Domain:
             elif key == 'Ly':     Ly     = float(val)
             elif key == 'x_axis': x_axis = val
             elif key == 'y_axis': y_axis = val
+            elif key == 'shape':  shapes.append(parse_shape_spec(val))
             else:
                 raise ValueError(f"Unknown header key: {key!r}")
 
         nx, ny, solid, bc_type = _parse_mesh_ascii(mesh_text)
         dx_arr = _parse_axis(x_axis, nx, Lx)
         dy_arr = _parse_axis(y_axis, ny, Ly)
+
+        if shapes:
+            xf = np.concatenate(([0.0], np.cumsum(dx_arr)))
+            yf = np.concatenate(([0.0], np.cumsum(dy_arr)))
+            xc = 0.5 * (xf[:-1] + xf[1:])
+            yc = 0.5 * (yf[:-1] + yf[1:])
+            X, Y = np.meshgrid(xc, yc, indexing='ij')          # (nx, ny)
+            for shape in shapes:
+                mask = shape.inside(X, Y)
+                if shape.kind == 'solid':
+                    solid = solid | mask
+                else:    # 'fluid' — carve out
+                    solid = solid & ~mask
+
         return cls(nx, ny, dx_arr, dy_arr, solid, bc_type, params)
 
     @classmethod
