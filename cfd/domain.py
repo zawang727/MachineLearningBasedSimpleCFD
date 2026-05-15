@@ -33,6 +33,27 @@ def _scalar_summary(arr: np.ndarray) -> float:
     return float(arr.mean())
 
 
+def tanh_spacing(n: int, L: float = 1.0, beta: float = 2.5) -> np.ndarray:
+    """
+    Double-sided tanh-stretched cell widths that cluster cells near *both*
+    domain edges (typical use: refine near no-slip walls).
+
+    n      : number of cells.
+    L      : total length to span.
+    beta   : clustering strength.  beta ≤ ~1 returns a near-uniform grid;
+             larger beta gives stronger clustering at the two ends.
+
+    Returns: dx_arr shape (n,) with sum == L.
+    """
+    if beta <= 1.0 + 1e-9:
+        return np.full(n, L / n, dtype=float)
+    s      = np.arange(n + 1, dtype=float) / n          # uniform [0, 1]
+    x_face = 0.5 * L * (1.0 + np.tanh(beta * (s - 0.5)) / np.tanh(beta * 0.5))
+    x_face[0]  = 0.0
+    x_face[-1] = L
+    return np.diff(x_face)
+
+
 class Domain:
     """
     2-D rectangular domain for MAC-grid NS solver.
@@ -184,5 +205,33 @@ class Domain:
             'bottom': 'no_slip', 'top': 'lid',
         }
         return cls(nx, ny, dx, dy,
+                   np.zeros((nx, ny), dtype=bool),
+                   bc_type, params or {})
+
+    @classmethod
+    def stretched_closed(
+        cls,
+        nx: int, ny: int,
+        Lx: float = 1.0,
+        Ly: float = 1.0,
+        beta_x: float = 1.0,
+        beta_y: float = 2.5,
+        params: dict | None = None,
+    ) -> 'Domain':
+        """
+        Closed lid-driven cavity on a tanh-stretched grid.
+
+        beta_x / beta_y = 1.0 → uniform along that axis.  Larger values
+        cluster cells near both walls.  Useful for resolving boundary
+        layers at moderate Reynolds numbers without scaling the cost as
+        nx² / ny².
+        """
+        dx_arr = tanh_spacing(nx, Lx, beta_x)
+        dy_arr = tanh_spacing(ny, Ly, beta_y)
+        bc_type = {
+            'left': 'no_slip', 'right': 'no_slip',
+            'bottom': 'no_slip', 'top': 'lid',
+        }
+        return cls(nx, ny, dx_arr, dy_arr,
                    np.zeros((nx, ny), dtype=bool),
                    bc_type, params or {})

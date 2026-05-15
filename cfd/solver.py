@@ -76,19 +76,66 @@ class Solver:
         self._u_prev = self.u.copy()
         self._v_prev = self.v.copy()
 
+        self._precompute_spacings()
+
         if dt is None:
             U_ref = max(abs(domain.bc_values.get('inlet_u', 0.0)),
                         abs(domain.bc_values.get('lid_u',   1.0)),
                         1e-6)
-            dx_min = min(domain.dx, domain.dy)
-            # 2-D CFL: combined u+v advection can reach ~3× U_ref in transient;
-            # use 0.2 safety factor so dt*(u+v)/dx stays well below 1.
-            dt_adv = 0.2 * dx_min / U_ref
-            dt_vis = 0.5 * dx_min ** 2 / (4.0 * material.nu)
+            # Smallest cell width sets the advection / viscous CFL on a
+            # stretched grid; on a uniform grid this equals min(dx, dy).
+            h_min  = min(float(domain.dx_arr.min()),
+                         float(domain.dy_arr.min()))
+            dt_adv = 0.2 * h_min / U_ref
+            dt_vis = 0.5 * h_min ** 2 / (4.0 * material.nu)
             dt = min(dt_adv, dt_vis)
         self.dt = float(dt)
 
         self._lu, self._rhs_bc, self._dirichlet_mask = self._build_poisson()
+
+    # ------------------------------------------------------------------ #
+    # Spacing caches — derived from domain.dx_arr / dy_arr.  On a uniform
+    # grid every entry collapses to the constant dx / dy.
+    # ------------------------------------------------------------------ #
+
+    def _precompute_spacings(self) -> None:
+        dx_arr = self.domain.dx_arr        # (nx,)
+        dy_arr = self.domain.dy_arr        # (ny,)
+        nx, ny = self.domain.nx, self.domain.ny
+
+        # --- u-array stencil distances ---
+        # ui[k] = u-face[k+1]; in x its left/right neighbours are u-face[k]
+        # / u-face[k+2], separated by cell widths dx_arr[k] / dx_arr[k+1].
+        self._bdist_x_u = dx_arr[:-1, None]   # (nx-1, 1)
+        self._fdist_x_u = dx_arr[1:,  None]   # (nx-1, 1)
+
+        # In y the u-faces sit at cell centres (y_cell[j]); the distance to
+        # the next u-row up is 0.5*(dy[j]+dy[j+1]).  Distance to a ghost row
+        # one cell beyond the wall is dy[0] (or dy[ny-1]) — the mirror image
+        # sits across the wall at the same offset.
+        dy_uy             = np.empty(ny + 1)
+        dy_uy[0]          = dy_arr[0]                          # ghost ↔ j=0
+        dy_uy[ny]         = dy_arr[ny - 1]                     # j=ny-1 ↔ ghost
+        dy_uy[1:ny]       = 0.5 * (dy_arr[:-1] + dy_arr[1:])
+        self._bdist_y_u   = dy_uy[:-1][None, :]                # (1, ny)
+        self._fdist_y_u   = dy_uy[1:][None,  :]                # (1, ny)
+
+        # --- v-array stencil distances ---
+        self._bdist_y_v = dy_arr[:-1][None, :]                 # (1, ny-1)
+        self._fdist_y_v = dy_arr[1:][None,  :]                 # (1, ny-1)
+
+        dx_vx             = np.empty(nx + 1)
+        dx_vx[0]          = dx_arr[0]
+        dx_vx[nx]         = dx_arr[nx - 1]
+        dx_vx[1:nx]       = 0.5 * (dx_arr[:-1] + dx_arr[1:])
+        self._bdist_x_v   = dx_vx[:-1, None]                   # (nx, 1)
+        self._fdist_x_v   = dx_vx[1:,  None]                   # (nx, 1)
+
+        # --- divergence (cell-volume) and pressure-gradient distances ---
+        self._inv_dx_cell = (1.0 / dx_arr)[:, None]            # (nx, 1)
+        self._inv_dy_cell = (1.0 / dy_arr)[None, :]            # (1, ny)
+        self._dx_pcorr    = 0.5 * (dx_arr[:-1] + dx_arr[1:])   # (nx-1,)
+        self._dy_pcorr    = 0.5 * (dy_arr[:-1] + dy_arr[1:])   # (ny-1,)
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -133,31 +180,27 @@ class Solver:
     # ------------------------------------------------------------------ #
 
     def _advect_diffuse(self):
-        nx, ny = self.domain.nx, self.domain.ny
-        dx, dy = self.domain.dx, self.domain.dy
         nu, dt = self.material.nu, self.dt
-        u, v   = self.u, self.v     # (nx+1,ny), (nx,ny+1)
+        u, v   = self.u, self.v
         bct    = self.domain.bc_type
         lid_u  = float(self.domain.bc_values.get('lid_u', 0.0))
+
+        bdx_u, fdx_u = self._bdist_x_u, self._fdist_x_u
+        bdy_u, fdy_u = self._bdist_y_u, self._fdist_y_u
+        bdy_v, fdy_v = self._bdist_y_v, self._fdist_y_v
+        bdx_v, fdx_v = self._bdist_x_v, self._fdist_x_v
 
         u_star = u.copy()
         v_star = v.copy()
 
         # ---- Update u[1:-1, :]: interior x-faces (nx-1, ny) ----
         ui = u[1:-1, :]   # (nx-1, ny)
-
-        # v interpolated to u-face positions (4-point average).
         v_at_u = 0.25 * (v[:-1, :-1] + v[:-1, 1:] + v[1:, :-1] + v[1:, 1:])
 
         du_dx = np.where(ui > 0,
-                         (u[1:-1, :] - u[:-2,  :]) / dx,
-                         (u[2:,   :] - u[1:-1, :]) / dx)
+                         (u[1:-1, :] - u[:-2,  :]) / bdx_u,
+                         (u[2:,   :] - u[1:-1, :]) / fdx_u)
 
-        # y-ghost rows for u-stencil. u-faces sit at y=(j+0.5)*dy; the walls
-        # are below j=0 (y=0) and above j=ny-1 (y=L). Reflect across them:
-        #   no_slip: u_ghost = -u_adjacent  →  u(wall) = 0
-        #   lid    : u_ghost = 2*lid_u - u_adjacent  →  u(wall) = lid_u
-        #   else   : zero-gradient (outlet / inlet / free-slip)
         def _u_ghost_y(side):
             ref = ui[:, 0:1] if side == 'bottom' else ui[:, -1:]
             bt  = bct.get(side, 'no_slip')
@@ -165,37 +208,40 @@ class Solver:
             if bt == 'lid':     return 2.0 * lid_u - ref
             return ref
 
-        u_py = np.concatenate([_u_ghost_y('bottom'), ui, _u_ghost_y('top')],
-                              axis=1)   # (nx-1, ny+2)
+        u_py  = np.concatenate([_u_ghost_y('bottom'), ui, _u_ghost_y('top')],
+                               axis=1)
         du_dy = np.where(v_at_u > 0,
-                         (ui           - u_py[:, :-2]) / dy,
-                         (u_py[:, 2:]  - ui           ) / dy)
+                         (ui          - u_py[:, :-2]) / bdy_u,
+                         (u_py[:, 2:] - ui          ) / fdy_u)
 
-        d2u_dx2 = (u[2:, :] - 2*ui + u[:-2, :]) / dx**2
-        d2u_dy2 = (u_py[:, 2:] - 2*ui + u_py[:, :-2]) / dy**2
+        # Non-uniform 2nd-derivative: 2/(h_L+h_R) * (ΔR/h_R - ΔL/h_L)
+        d2u_dx2 = 2.0 / (bdx_u + fdx_u) * (
+            (u[2:, :] - ui) / fdx_u - (ui - u[:-2, :]) / bdx_u)
+        d2u_dy2 = 2.0 / (bdy_u + fdy_u) * (
+            (u_py[:, 2:] - ui) / fdy_u - (ui - u_py[:, :-2]) / bdy_u)
 
         u_star[1:-1, :] = ui + dt * (-ui * du_dx - v_at_u * du_dy
                                      + nu * (d2u_dx2 + d2u_dy2))
 
         # ---- Update v[:, 1:-1]: interior y-faces (nx, ny-1) ----
-        vi = v[:, 1:-1]   # (nx, ny-1)
-
+        vi = v[:, 1:-1]
         u_at_v = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
 
         dv_dy = np.where(vi > 0,
-                         (v[:, 1:-1] - v[:, :-2]) / dy,
-                         (v[:, 2:]   - v[:, 1:-1]) / dy)
+                         (v[:, 1:-1] - v[:, :-2]) / bdy_v,
+                         (v[:, 2:]   - v[:, 1:-1]) / fdy_v)
 
-        # x-ghost columns for v-stencil — anti-symmetric for no_slip walls.
         v_left  = -vi[0:1,  :] if bct.get('left')  == 'no_slip' else vi[0:1,  :]
         v_right = -vi[-1:,  :] if bct.get('right') == 'no_slip' else vi[-1:,  :]
-        v_px = np.concatenate([v_left, vi, v_right], axis=0)   # (nx+2, ny-1)
+        v_px = np.concatenate([v_left, vi, v_right], axis=0)
         dv_dx = np.where(u_at_v > 0,
-                         (vi           - v_px[:-2, :]) / dx,
-                         (v_px[2:, :]  - vi           ) / dx)
+                         (vi          - v_px[:-2, :]) / bdx_v,
+                         (v_px[2:, :] - vi          ) / fdx_v)
 
-        d2v_dy2 = (v[:, 2:] - 2*vi + v[:, :-2]) / dy**2
-        d2v_dx2 = (v_px[2:, :] - 2*vi + v_px[:-2, :]) / dx**2
+        d2v_dy2 = 2.0 / (bdy_v + fdy_v) * (
+            (v[:, 2:] - vi) / fdy_v - (vi - v[:, :-2]) / bdy_v)
+        d2v_dx2 = 2.0 / (bdx_v + fdx_v) * (
+            (v_px[2:, :] - vi) / fdx_v - (vi - v_px[:-2, :]) / bdx_v)
 
         v_star[:, 1:-1] = vi + dt * (-u_at_v * dv_dx - vi * dv_dy
                                      + nu * (d2v_dx2 + d2v_dy2))
@@ -264,15 +310,12 @@ class Solver:
 
     def _solve_pressure(self, u_star: np.ndarray, v_star: np.ndarray) -> np.ndarray:
         nx, ny = self.domain.nx, self.domain.ny
-        dx, dy = self.domain.dx, self.domain.dy
         rho, dt = self.material.rho, self.dt
 
-        div = ((u_star[1:, :] - u_star[:-1, :]) / dx
-             + (v_star[:, 1:] - v_star[:, :-1]) / dy)   # (nx, ny)
+        div = ((u_star[1:, :] - u_star[:-1, :]) * self._inv_dx_cell
+             + (v_star[:, 1:] - v_star[:, :-1]) * self._inv_dy_cell)   # (nx, ny)
         rhs = (rho / dt) * div.flatten(order='F') + self._rhs_bc
 
-        # Ghost-row cells (outlets + wall rows) are constrained by _build_poisson;
-        # their RHS must be 0 (constraint equations, not Poisson source rows).
         rhs[self._dirichlet_mask] = 0.0
         rhs[self.domain.solid.flatten(order='F')] = 0.0
 
@@ -280,14 +323,14 @@ class Solver:
         return p_flat.reshape((nx, ny), order='F')
 
     def _correct_velocity(self, u_star, v_star, p):
-        dx, dy = self.domain.dx, self.domain.dy
         dt, rho = self.dt, self.material.rho
-        α = self.relax   # under-relaxation factor (1.0 = no relaxation)
+        α = self.relax
 
         u_new = u_star.copy()
         v_new = v_star.copy()
-        u_new[1:-1, :] -= α * (dt / rho) * (p[1:, :] - p[:-1, :]) / dx
-        v_new[:, 1:-1] -= α * (dt / rho) * (p[:, 1:] - p[:, :-1]) / dy
+        # Pressure gradient at u-face[i] is (p[i] - p[i-1]) / (x_cell[i] - x_cell[i-1]).
+        u_new[1:-1, :] -= α * (dt / rho) * (p[1:, :] - p[:-1, :]) / self._dx_pcorr[:, None]
+        v_new[:, 1:-1] -= α * (dt / rho) * (p[:, 1:] - p[:, :-1]) / self._dy_pcorr[None, :]
         return u_new, v_new
 
     # ------------------------------------------------------------------ #
@@ -296,18 +339,24 @@ class Solver:
 
     def _build_poisson(self):
         """
-        Build LU-factored sparse Laplacian for  ∇²p = rhs.
+        Build LU-factored sparse Laplacian for ∇²p = rhs.
 
-        All nx × ny pressure cells are real fluid cells; walls live on the
-        u/v faces at i=0, i=nx and j=0, j=ny.
+        Finite-volume flux balance for cell (i, j) divided by the cell
+        volume (dx[i]·dy[j]); for non-uniform spacing the off-diagonal
+        coefficients are
+            ax_minus[i] = 1 / (dx[i] · ½(dx[i−1]+dx[i]))
+            ax_plus[i]  = 1 / (dx[i] · ½(dx[i]+dx[i+1]))
+        and analogously for y. On a uniform grid they collapse to 1/dx²
+        and 1/dy² respectively.
 
         Boundary conditions:
-          Neumann (∂p/∂n = 0) at walls / inlets / lids   → reduces diagonal.
+          Neumann (∂p/∂n = 0) at walls / inlets / lids → coefficient omitted.
           Dirichlet (p = 0)   at outlet face cells.
           Closed cavity (no outlet): pin p=0 at one cell.
         """
         nx, ny = self.domain.nx, self.domain.ny
-        dx, dy = self.domain.dx, self.domain.dy
+        dx_arr = self.domain.dx_arr
+        dy_arr = self.domain.dy_arr
         bct    = self.domain.bc_type
         n      = nx * ny
 
@@ -324,6 +373,16 @@ class Solver:
             if outlet_bottom and j == 0:      return True
             return False
 
+        # Non-uniform finite-volume Laplacian coefficients
+        ax_minus = np.zeros(nx); ax_plus = np.zeros(nx)
+        ay_minus = np.zeros(ny); ay_plus = np.zeros(ny)
+        if nx >= 2:
+            ax_minus[1:]  = 1.0 / (dx_arr[1:]  * 0.5 * (dx_arr[:-1] + dx_arr[1:]))
+            ax_plus[:-1]  = 1.0 / (dx_arr[:-1] * 0.5 * (dx_arr[:-1] + dx_arr[1:]))
+        if ny >= 2:
+            ay_minus[1:]  = 1.0 / (dy_arr[1:]  * 0.5 * (dy_arr[:-1] + dy_arr[1:]))
+            ay_plus[:-1]  = 1.0 / (dy_arr[:-1] * 0.5 * (dy_arr[:-1] + dy_arr[1:]))
+
         L   = lil_matrix((n, n))
         rhs = np.zeros(n)
 
@@ -338,20 +397,20 @@ class Solver:
                 c = 0.0
                 if i > 0:
                     if not _is_outlet(i-1, j):
-                        L[k, (i-1) + j*nx] += 1.0 / dx**2
-                    c -= 1.0 / dx**2
+                        L[k, (i-1) + j*nx] += ax_minus[i]
+                    c -= ax_minus[i]
                 if i < nx - 1:
                     if not _is_outlet(i+1, j):
-                        L[k, (i+1) + j*nx] += 1.0 / dx**2
-                    c -= 1.0 / dx**2
+                        L[k, (i+1) + j*nx] += ax_plus[i]
+                    c -= ax_plus[i]
                 if j > 0:
                     if not _is_outlet(i, j-1):
-                        L[k, i + (j-1)*nx] += 1.0 / dy**2
-                    c -= 1.0 / dy**2
+                        L[k, i + (j-1)*nx] += ay_minus[j]
+                    c -= ay_minus[j]
                 if j < ny - 1:
                     if not _is_outlet(i, j+1):
-                        L[k, i + (j+1)*nx] += 1.0 / dy**2
-                    c -= 1.0 / dy**2
+                        L[k, i + (j+1)*nx] += ay_plus[j]
+                    c -= ay_plus[j]
 
                 L[k, k] = c if c != 0.0 else -1.0
 

@@ -5,7 +5,7 @@ import matplotlib.colors as mcolors
 
 
 def plot_velocity(state, title: str = "", save_path: str = "") -> None:
-    """Velocity magnitude colormap + streamlines."""
+    """Velocity magnitude colormap + streamlines (quiver on stretched grids)."""
     uc = state.u_cell
     vc = state.v_cell
     spd = state.speed
@@ -16,8 +16,17 @@ def plot_velocity(state, title: str = "", save_path: str = "") -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
     cf = ax.contourf(x, y, spd.T, levels=20, cmap='viridis')
     fig.colorbar(cf, ax=ax, label='Speed [m/s]')
-    ax.streamplot(x, y, uc.T, vc.T, color='white', linewidth=0.6,
-                  density=1.2, arrowsize=0.8)
+    if _is_uniform(x) and _is_uniform(y):
+        ax.streamplot(x, y, uc.T, vc.T, color='white', linewidth=0.6,
+                      density=1.2, arrowsize=0.8)
+    else:
+        # streamplot demands equally-spaced axes; fall back to a sparse quiver.
+        stride = max(1, min(state.domain.nx, state.domain.ny) // 20)
+        xi = np.arange(stride // 2, state.domain.nx, stride)
+        yi = np.arange(stride // 2, state.domain.ny, stride)
+        Xq, Yq = np.meshgrid(x[xi], y[yi], indexing='xy')
+        ax.quiver(Xq, Yq, uc[np.ix_(xi, yi)].T, vc[np.ix_(xi, yi)].T,
+                  color='white', scale=20, width=0.0025, alpha=0.9)
     _draw_solid(ax, state.domain, x, y)
     ax.set_xlabel('x'); ax.set_ylabel('y')
     ax.set_title(title or 'Velocity magnitude + streamlines')
@@ -160,6 +169,13 @@ def plot_training_history(train_losses: list, val_losses: list, save_path: str =
     if save_path:
         plt.savefig(save_path, dpi=150)
     plt.close()
+
+
+def _is_uniform(arr: np.ndarray, rtol: float = 1e-6) -> bool:
+    if arr.size < 2:
+        return True
+    diffs = np.diff(arr)
+    return bool(np.allclose(diffs, diffs[0], rtol=rtol))
 
 
 def _draw_solid(ax, domain, x, y) -> None:
