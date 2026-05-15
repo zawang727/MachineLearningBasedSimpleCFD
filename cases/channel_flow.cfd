@@ -1,0 +1,36 @@
+# Poiseuille channel flow, Re = 100, wall-clustered grid.
+#
+# Re = U_avg * H / nu = 1 * 1 / 0.01 = 100.
+# Validates against u(y) = 6·U_avg·y·(H−y)/H².
+#
+# Run:
+#   python cases/run.py cases/channel_flow.cfd
+
+rho:     1.0
+nu:      0.01
+inlet_u: 1.0
+
+Lx:      4.0
+Ly:      1.0
+x_axis:  uniform
+y_axis:  tanh beta=2.0   # tighter cells at the no-slip walls
+
+---
+##############################################################################
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+>                                                                            <
+##############################################################################

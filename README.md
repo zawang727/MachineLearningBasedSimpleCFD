@@ -20,6 +20,56 @@ Discretised on a **MAC staggered grid**:
 
 Stability: `dt ≤ min(dx/U, 0.5·dx²/ν)` — computed automatically.
 
+## `.cfd` Input File
+
+Bundles fluid properties, axis stretching, and the cell map in a single
+plain-text file.  Faster to debug than embedded Python strings — edit, save,
+re-run.
+
+```
+# cases/lid_driven_cavity.cfd
+rho:    1.0
+nu:     0.01            # Re = U_lid * L / nu = 100
+lid_u:  1.0
+
+Lx:     1.0
+Ly:     1.0
+x_axis: uniform
+y_axis: tanh beta=2.5   # cluster cells near top and bottom walls
+
+---
+------------------
+#                #
+#                #
+... (16 fluid rows)
+#                #
+##################
+```
+
+Run it through the generic driver:
+
+```bash
+python cases/run.py cases/lid_driven_cavity.cfd
+python cases/run.py cases/channel_flow.cfd --duration 15
+```
+
+Header keys (all optional; everything has a default):
+
+| Key | Meaning |
+|---|---|
+| `rho`, `nu` | Fluid density and kinematic viscosity |
+| `lid_u`, `inlet_u`, `inlet_v` | BC magnitudes |
+| `Lx`, `Ly` | Total domain lengths (default 1.0 each) |
+| `x_axis`, `y_axis` | Cell-width stretching spec (see below) |
+
+Stretching specs:
+- `uniform` — equal-width cells.
+- `tanh beta=2.5` — double-sided tanh clustering; larger β = tighter wall layers.
+- `list 0.02 0.03 0.04 ...` — explicit cell widths (must sum to `Lx`/`Ly`).
+
+A file with no `---` separator is parsed as a plain ASCII map with all
+defaults — preserves the legacy embedded-string layout.
+
 ## ASCII Map Interface
 
 Define geometry by writing a text map. Each character sets a cell or face type:

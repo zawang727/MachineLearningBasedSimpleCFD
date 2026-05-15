@@ -54,6 +54,68 @@ def tanh_spacing(n: int, L: float = 1.0, beta: float = 2.5) -> np.ndarray:
     return np.diff(x_face)
 
 
+def _parse_axis(spec: str, n: int, L: float) -> np.ndarray:
+    """
+    Parse a stretching spec into a (n,) cell-width array.
+
+    Accepted forms:
+      'uniform'                  → L/n everywhere
+      'tanh' / 'tanh beta=2.5'   → double-sided tanh clustering
+      'list 0.02 0.03 0.04 ...'  → explicit cell widths (must sum to ≈ L)
+    """
+    parts = spec.strip().split()
+    if not parts:
+        return np.full(n, L / n)
+    kind = parts[0]
+    if kind == 'uniform':
+        return np.full(n, L / n)
+    if kind == 'tanh':
+        kwargs = dict(t.split('=', 1) for t in parts[1:] if '=' in t)
+        beta   = float(kwargs.get('beta', 2.5))
+        return tanh_spacing(n, L, beta)
+    if kind == 'list':
+        widths = np.asarray([float(t) for t in parts[1:]], dtype=float)
+        if widths.size != n:
+            raise ValueError(f"axis 'list' expected {n} widths, got {widths.size}")
+        if not np.isclose(widths.sum(), L, rtol=1e-3):
+            raise ValueError(
+                f"axis 'list' widths sum to {widths.sum():.6f}, expected {L}")
+        return widths
+    raise ValueError(f"Unknown axis kind: {kind!r}")
+
+
+def _parse_mesh_ascii(map_str: str):
+    """
+    Parse an ASCII cell map into (nx, ny, solid, bc_type).
+
+    Shared between Domain.from_ascii and Domain.from_text so the two
+    entry points use identical mesh semantics.
+    """
+    lines = [ln for ln in map_str.splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("ASCII map is empty")
+    width = max(len(ln) for ln in lines)
+    lines = [ln.ljust(width) for ln in lines]
+    grid  = np.array([[c for c in ln] for ln in lines])[::-1, :]
+
+    def _dominant(chars):
+        for ch in chars:
+            if ch in _EDGE_BC:
+                return _EDGE_BC[ch]
+        return 'no_slip'
+
+    bc_type = {
+        'left':   _dominant(grid[1:-1, 0]),
+        'right':  _dominant(grid[1:-1, -1]),
+        'bottom': _dominant(grid[0,    1:-1]),
+        'top':    _dominant(grid[-1,   1:-1]),
+    }
+    interior     = grid[1:-1, 1:-1]
+    ny_in, nx_in = interior.shape
+    solid        = (interior.T == _SOLID)
+    return nx_in, ny_in, solid, bc_type
+
+
 class Domain:
     """
     2-D rectangular domain for MAC-grid NS solver.
@@ -152,42 +214,73 @@ class Domain:
         params:  dict,
         dx:      float = 1.0,
         dy:      float | None = None,
-    ) -> Domain:
+    ) -> 'Domain':
         if dy is None:
             dy = dx
-
-        lines = [ln for ln in map_str.splitlines() if ln.strip()]
-        if not lines:
-            raise ValueError("ASCII map is empty")
-
-        width = max(len(ln) for ln in lines)
-        lines = [ln.ljust(width) for ln in lines]
-
-        # Build char grid, flip so row-0 = bottom (low y)
-        grid = np.array([[c for c in ln] for ln in lines])[::-1, :]
-
-        ny_total, nx_total = grid.shape
-
-        def _dominant(chars):
-            for ch in chars:
-                if ch in _EDGE_BC:
-                    return _EDGE_BC[ch]
-            return 'no_slip'
-
-        # Exclude corners (shared by two edges) to avoid # overriding > or <
-        bc_type = {
-            'left':   _dominant(grid[1:-1, 0]),
-            'right':  _dominant(grid[1:-1, -1]),
-            'bottom': _dominant(grid[0, 1:-1]),
-            'top':    _dominant(grid[-1, 1:-1]),
-        }
-
-        interior = grid[1:-1, 1:-1]          # (ny-2, nx-2) after stripping border
-        ny_in, nx_in = interior.shape
-        # Transpose so solid[i,j] = x-column i, y-row j
-        solid = (interior.T == _SOLID)
-
+        nx_in, ny_in, solid, bc_type = _parse_mesh_ascii(map_str)
         return cls(nx_in, ny_in, dx, dy, solid, bc_type, dict(params))
+
+    @classmethod
+    def from_text(cls, text: str) -> 'Domain':
+        """
+        Build a Domain from a plain-text spec.  Two sections separated by a
+        line containing only '---':
+
+          # Optional header — '# comment' lines and 'key: value' lines.
+          # Recognised keys:
+          #   rho, nu, lid_u, inlet_u, inlet_v   → fluid / BC parameters
+          #   Lx, Ly                              → total domain lengths
+          #   x_axis, y_axis                      → stretching spec
+          #                                         ('uniform' | 'tanh beta=…'
+          #                                          | 'list w1 w2 …')
+
+          ---
+
+          ##############
+          >            <
+          >            <
+          ##############
+
+        A file with no '---' separator is parsed as a plain ASCII map with
+        all defaults (Lx=Ly=1, uniform spacing, no extra parameters).
+        """
+        if '---' in text:
+            header_text, mesh_text = text.split('---', 1)
+        else:
+            header_text, mesh_text = '', text
+
+        params = {}
+        Lx, Ly = 1.0, 1.0
+        x_axis = 'uniform'
+        y_axis = 'uniform'
+
+        for raw in header_text.splitlines():
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            if ':' not in line:
+                raise ValueError(f"header line must be 'key: value': {raw!r}")
+            key, val = line.split(':', 1)
+            key, val = key.strip(), val.strip()
+            if key in ('rho', 'nu', 'lid_u', 'inlet_u', 'inlet_v'):
+                params[key] = float(val)
+            elif key == 'Lx':     Lx     = float(val)
+            elif key == 'Ly':     Ly     = float(val)
+            elif key == 'x_axis': x_axis = val
+            elif key == 'y_axis': y_axis = val
+            else:
+                raise ValueError(f"Unknown header key: {key!r}")
+
+        nx, ny, solid, bc_type = _parse_mesh_ascii(mesh_text)
+        dx_arr = _parse_axis(x_axis, nx, Lx)
+        dy_arr = _parse_axis(y_axis, ny, Ly)
+        return cls(nx, ny, dx_arr, dy_arr, solid, bc_type, params)
+
+    @classmethod
+    def from_file(cls, path: str) -> 'Domain':
+        """Load a Domain from a .cfd text file (see from_text for format)."""
+        with open(path, 'r', encoding='utf-8') as f:
+            return cls.from_text(f.read())
 
     @classmethod
     def closed(
