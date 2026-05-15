@@ -1,0 +1,36 @@
+# 3-D lid-driven cavity, Re = 100, tanh-stretched cells near all walls.
+#
+# Run:
+#   python cases/run.py cases/lid_driven_cavity_3d.cfd
+
+rho:    1.0
+nu:     0.01            # Re = U_lid * L / nu = 100
+lid_u:  1.0
+
+Lx:     1.0
+Ly:     1.0
+Lz:     1.0
+nz:     16              # presence of `nz:` marks this as a 3-D file
+x_axis: uniform
+y_axis: tanh beta=2.5   # cluster cells near top lid and bottom wall
+z_axis: tanh beta=1.5   # mild clustering near front / back walls
+
+---
+------------------
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+#                #
+##################

@@ -1,7 +1,8 @@
 from __future__ import annotations
 import numpy as np
 from .domain import Domain as _Domain2D
-from .domain import _as_spacing, _scalar_summary
+from .domain import (_as_spacing, _scalar_summary,
+                     _parse_axis, _parse_mesh_ascii, tanh_spacing)
 
 
 class Domain3D:
@@ -199,3 +200,93 @@ class Domain3D:
         return cls(nx, ny, nz, dx, dy or dx, dz or dx,
                    np.zeros((nx, ny, nz), dtype=bool),
                    bc_type, params or {})
+
+    @classmethod
+    def stretched_closed(
+        cls,
+        nx: int, ny: int, nz: int,
+        Lx: float = 1.0, Ly: float = 1.0, Lz: float = 1.0,
+        beta_x: float = 1.0, beta_y: float = 2.5, beta_z: float = 1.0,
+        params: dict | None = None,
+    ) -> 'Domain3D':
+        """3-D lid-driven cavity on a tanh-stretched grid (clusters near walls)."""
+        dx_arr = tanh_spacing(nx, Lx, beta_x)
+        dy_arr = tanh_spacing(ny, Ly, beta_y)
+        dz_arr = tanh_spacing(nz, Lz, beta_z)
+        bc_type = {
+            'left':   'no_slip', 'right':  'no_slip',
+            'bottom': 'no_slip', 'top':    'lid',
+            'front':  'no_slip', 'back':   'no_slip',
+        }
+        return cls(nx, ny, nz, dx_arr, dy_arr, dz_arr,
+                   np.zeros((nx, ny, nz), dtype=bool),
+                   bc_type, params or {})
+
+    @classmethod
+    def from_text(cls, text: str) -> 'Domain3D':
+        """
+        Build a Domain3D from a plain-text spec.  Same format as Domain.from_text
+        but with z-axis extras.  The header MUST set `nz` to distinguish a 3D
+        file from a 2D file; the 2D ASCII map after `---` is extruded `nz`
+        times along z.
+
+        Header keys (all optional except `nz` for 3D):
+          rho, nu, lid_u, inlet_u, inlet_v     fluid / BC parameters
+          Lx, Ly, Lz                            domain lengths (default 1)
+          nz                                    # of z-extrusion layers (required)
+          x_axis, y_axis, z_axis                stretching specs
+        """
+        if '---' not in text:
+            raise ValueError("3-D input file needs a '---' separator")
+        header_text, mesh_text = text.split('---', 1)
+
+        params = {}
+        Lx, Ly, Lz = 1.0, 1.0, 1.0
+        x_axis = 'uniform'
+        y_axis = 'uniform'
+        z_axis = 'uniform'
+        nz     = None
+
+        for raw in header_text.splitlines():
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            if ':' not in line:
+                raise ValueError(f"header line must be 'key: value': {raw!r}")
+            key, val = line.split(':', 1)
+            key, val = key.strip(), val.strip()
+            if key in ('rho', 'nu', 'lid_u', 'inlet_u', 'inlet_v'):
+                params[key] = float(val)
+            elif key == 'Lx':     Lx     = float(val)
+            elif key == 'Ly':     Ly     = float(val)
+            elif key == 'Lz':     Lz     = float(val)
+            elif key == 'nz':     nz     = int(val)
+            elif key == 'x_axis': x_axis = val
+            elif key == 'y_axis': y_axis = val
+            elif key == 'z_axis': z_axis = val
+            else:
+                raise ValueError(f"Unknown header key: {key!r}")
+
+        if nz is None:
+            raise ValueError("3-D input file must declare 'nz: <int>' in the header")
+
+        nx, ny, solid2d, bc_type = _parse_mesh_ascii(mesh_text)
+        dx_arr = _parse_axis(x_axis, nx, Lx)
+        dy_arr = _parse_axis(y_axis, ny, Ly)
+        dz_arr = _parse_axis(z_axis, nz, Lz)
+
+        # Extrude the 2-D solid mask uniformly in z, then default the front /
+        # back walls to no-slip (they are not encoded in a 2-D ASCII map).
+        solid3d = np.repeat(solid2d[:, :, None], nz, axis=2)
+        bc_type = dict(bc_type)
+        bc_type.setdefault('front', 'no_slip')
+        bc_type.setdefault('back',  'no_slip')
+
+        return cls(nx, ny, nz, dx_arr, dy_arr, dz_arr,
+                   solid3d, bc_type, params)
+
+    @classmethod
+    def from_file(cls, path: str) -> 'Domain3D':
+        """Load a Domain3D from a .cfd text file (see from_text for format)."""
+        with open(path, 'r', encoding='utf-8') as f:
+            return cls.from_text(f.read())

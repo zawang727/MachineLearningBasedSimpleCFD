@@ -84,11 +84,17 @@ class Solver3D:
         self._v_prev = self.v.copy()
         self._w_prev = self.w.copy()
 
+        self._precompute_spacings()
+
         if dt is None:
             U_ref = max(abs(domain.bc_values.get('inlet_u', 0.0)),
                         abs(domain.bc_values.get('lid_u',   1.0)),
                         1e-6)
-            h = min(domain.dx, domain.dy, domain.dz)
+            # Smallest cell in any direction sets the advection / viscous CFL
+            # on a stretched grid.
+            h = min(float(domain.dx_arr.min()),
+                    float(domain.dy_arr.min()),
+                    float(domain.dz_arr.min()))
             dt_adv = 0.15 * h / U_ref
             dt_vis = 0.5 * h**2 / (6.0 * material.nu)
             dt = min(dt_adv, dt_vis)
@@ -104,6 +110,63 @@ class Solver3D:
             diag = np.abs(np.array(self._L.diagonal()))
             diag[diag < 1e-14] = 1.0
             self._precond_diag = 1.0 / diag
+
+    # ------------------------------------------------------------------ #
+    # Spacing caches — derived from domain.dx_arr / dy_arr / dz_arr.  On a
+    # uniform grid every entry collapses to the constant dx / dy / dz.
+    # ------------------------------------------------------------------ #
+
+    def _precompute_spacings(self) -> None:
+        dx_arr = self.domain.dx_arr
+        dy_arr = self.domain.dy_arr
+        dz_arr = self.domain.dz_arr
+        nx, ny, nz = self.domain.nx, self.domain.ny, self.domain.nz
+
+        def _face_dist(spacing):
+            """Cell-centre-to-centre distances (n+1,), incl. wall-image rows."""
+            n = spacing.size
+            d         = np.empty(n + 1)
+            d[0]      = spacing[0]                           # ghost ↔ first
+            d[n]      = spacing[n - 1]                       # last ↔ ghost
+            d[1:n]    = 0.5 * (spacing[:-1] + spacing[1:])
+            return d
+
+        dy_uy = _face_dist(dy_arr)
+        dz_uz = _face_dist(dz_arr)
+        dx_vx = _face_dist(dx_arr)
+
+        # --- u-array stencil distances ---
+        # ui[k, j, l] = u-face[k+1, j, l].
+        self._bdist_x_u = dx_arr[:-1, None, None]              # (nx-1, 1, 1)
+        self._fdist_x_u = dx_arr[1:,  None, None]
+        self._bdist_y_u = dy_uy[:-1][None, :, None]            # (1, ny, 1)
+        self._fdist_y_u = dy_uy[1:][None,  :, None]
+        self._bdist_z_u = dz_uz[:-1][None, None, :]            # (1, 1, nz)
+        self._fdist_z_u = dz_uz[1:][None,  None, :]
+
+        # --- v-array stencil distances ---
+        self._bdist_y_v = dy_arr[:-1][None, :, None]           # (1, ny-1, 1)
+        self._fdist_y_v = dy_arr[1:][None,  :, None]
+        self._bdist_x_v = dx_vx[:-1][:, None, None]            # (nx, 1, 1)
+        self._fdist_x_v = dx_vx[1:][:,  None, None]
+        self._bdist_z_v = dz_uz[:-1][None, None, :]            # (1, 1, nz)
+        self._fdist_z_v = dz_uz[1:][None,  None, :]
+
+        # --- w-array stencil distances ---
+        self._bdist_z_w = dz_arr[:-1][None, None, :]           # (1, 1, nz-1)
+        self._fdist_z_w = dz_arr[1:][None,  None, :]
+        self._bdist_x_w = dx_vx[:-1][:, None, None]            # (nx, 1, 1)
+        self._fdist_x_w = dx_vx[1:][:,  None, None]
+        self._bdist_y_w = dy_uy[:-1][None, :, None]            # (1, ny, 1)
+        self._fdist_y_w = dy_uy[1:][None,  :, None]
+
+        # --- divergence + pressure-gradient distances ---
+        self._inv_dx_cell = (1.0 / dx_arr)[:, None, None]      # (nx, 1, 1)
+        self._inv_dy_cell = (1.0 / dy_arr)[None, :, None]
+        self._inv_dz_cell = (1.0 / dz_arr)[None, None, :]
+        self._dx_pcorr    = (0.5 * (dx_arr[:-1] + dx_arr[1:]))[:, None, None]
+        self._dy_pcorr    = (0.5 * (dy_arr[:-1] + dy_arr[1:]))[None, :, None]
+        self._dz_pcorr    = (0.5 * (dz_arr[:-1] + dz_arr[1:]))[None, None, :]
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -150,12 +213,20 @@ class Solver3D:
     # ------------------------------------------------------------------ #
 
     def _advect_diffuse(self):
-        nx, ny, nz = self.domain.nx, self.domain.ny, self.domain.nz
-        dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
         nu, dt = self.material.nu, self.dt
         u, v, w = self.u, self.v, self.w
         bct    = self.domain.bc_type
         lid_u  = float(self.domain.bc_values.get('lid_u', 0.0))
+
+        bdx_u, fdx_u = self._bdist_x_u, self._fdist_x_u
+        bdy_u, fdy_u = self._bdist_y_u, self._fdist_y_u
+        bdz_u, fdz_u = self._bdist_z_u, self._fdist_z_u
+        bdx_v, fdx_v = self._bdist_x_v, self._fdist_x_v
+        bdy_v, fdy_v = self._bdist_y_v, self._fdist_y_v
+        bdz_v, fdz_v = self._bdist_z_v, self._fdist_z_v
+        bdx_w, fdx_w = self._bdist_x_w, self._fdist_x_w
+        bdy_w, fdy_w = self._bdist_y_w, self._fdist_y_w
+        bdz_w, fdz_w = self._bdist_z_w, self._fdist_z_w
 
         u_star = u.copy()
         v_star = v.copy()
@@ -198,22 +269,26 @@ class Solver3D:
                          w[1:,  :, :-1] + w[1:,  :, 1:])
 
         du_dx = np.where(ui > 0,
-                         (u[1:-1, :, :] - u[:-2, :, :]) / dx,
-                         (u[2:,   :, :] - u[1:-1, :, :]) / dx)
+                         (u[1:-1, :, :] - u[:-2, :, :]) / bdx_u,
+                         (u[2:,   :, :] - u[1:-1, :, :]) / fdx_u)
 
         u_py = _pad(ui, var='u', axis=1, allow_lid=True)
         du_dy = np.where(v_at_u > 0,
-                         (ui              - u_py[:, :-2, :]) / dy,
-                         (u_py[:, 2:, :] - ui              ) / dy)
+                         (ui             - u_py[:, :-2, :]) / bdy_u,
+                         (u_py[:, 2:, :] - ui             ) / fdy_u)
 
         u_pz = _pad(ui, var='u', axis=2, allow_lid=False)
         du_dz = np.where(w_at_u > 0,
-                         (ui              - u_pz[:, :, :-2]) / dz,
-                         (u_pz[:, :, 2:] - ui              ) / dz)
+                         (ui             - u_pz[:, :, :-2]) / bdz_u,
+                         (u_pz[:, :, 2:] - ui             ) / fdz_u)
 
-        d2u_dx2 = (u[2:,   :, :] - 2*ui + u[:-2, :, :]) / dx**2
-        d2u_dy2 = (u_py[:, 2:, :] - 2*ui + u_py[:, :-2, :]) / dy**2
-        d2u_dz2 = (u_pz[:, :, 2:] - 2*ui + u_pz[:, :, :-2]) / dz**2
+        # Non-uniform 2nd derivative: 2/(h_L+h_R) · (Δ_R/h_R − Δ_L/h_L)
+        d2u_dx2 = 2.0 / (bdx_u + fdx_u) * (
+            (u[2:, :, :] - ui) / fdx_u - (ui - u[:-2, :, :]) / bdx_u)
+        d2u_dy2 = 2.0 / (bdy_u + fdy_u) * (
+            (u_py[:, 2:, :] - ui) / fdy_u - (ui - u_py[:, :-2, :]) / bdy_u)
+        d2u_dz2 = 2.0 / (bdz_u + fdz_u) * (
+            (u_pz[:, :, 2:] - ui) / fdz_u - (ui - u_pz[:, :, :-2]) / bdz_u)
 
         u_star[1:-1, :, :] = ui + dt * (
             -ui * du_dx - v_at_u * du_dy - w_at_u * du_dz
@@ -228,22 +303,25 @@ class Solver3D:
                          w[:, 1:,  :-1] + w[:, 1:,  1:])
 
         dv_dy = np.where(vi > 0,
-                         (v[:, 1:-1, :] - v[:, :-2, :]) / dy,
-                         (v[:, 2:,   :] - v[:, 1:-1, :]) / dy)
+                         (v[:, 1:-1, :] - v[:, :-2, :]) / bdy_v,
+                         (v[:, 2:,   :] - v[:, 1:-1, :]) / fdy_v)
 
         v_px = _pad(vi, var='v', axis=0, allow_lid=False)
         dv_dx = np.where(u_at_v > 0,
-                         (vi             - v_px[:-2, :, :]) / dx,
-                         (v_px[2:, :, :] - vi             ) / dx)
+                         (vi             - v_px[:-2, :, :]) / bdx_v,
+                         (v_px[2:, :, :] - vi             ) / fdx_v)
 
         v_pz = _pad(vi, var='v', axis=2, allow_lid=False)
         dv_dz = np.where(w_at_v > 0,
-                         (vi             - v_pz[:, :, :-2]) / dz,
-                         (v_pz[:, :, 2:] - vi             ) / dz)
+                         (vi             - v_pz[:, :, :-2]) / bdz_v,
+                         (v_pz[:, :, 2:] - vi             ) / fdz_v)
 
-        d2v_dy2 = (v[:, 2:, :] - 2*vi + v[:, :-2, :]) / dy**2
-        d2v_dx2 = (v_px[2:, :, :] - 2*vi + v_px[:-2, :, :]) / dx**2
-        d2v_dz2 = (v_pz[:, :, 2:] - 2*vi + v_pz[:, :, :-2]) / dz**2
+        d2v_dy2 = 2.0 / (bdy_v + fdy_v) * (
+            (v[:, 2:, :] - vi) / fdy_v - (vi - v[:, :-2, :]) / bdy_v)
+        d2v_dx2 = 2.0 / (bdx_v + fdx_v) * (
+            (v_px[2:, :, :] - vi) / fdx_v - (vi - v_px[:-2, :, :]) / bdx_v)
+        d2v_dz2 = 2.0 / (bdz_v + fdz_v) * (
+            (v_pz[:, :, 2:] - vi) / fdz_v - (vi - v_pz[:, :, :-2]) / bdz_v)
 
         v_star[:, 1:-1, :] = vi + dt * (
             -u_at_v * dv_dx - vi * dv_dy - w_at_v * dv_dz
@@ -258,22 +336,25 @@ class Solver3D:
                          v[:, 1:,  :-1] + v[:, 1:,  1:])
 
         dw_dz = np.where(wi > 0,
-                         (w[:, :, 1:-1] - w[:, :, :-2]) / dz,
-                         (w[:, :, 2:]   - w[:, :, 1:-1]) / dz)
+                         (w[:, :, 1:-1] - w[:, :, :-2]) / bdz_w,
+                         (w[:, :, 2:]   - w[:, :, 1:-1]) / fdz_w)
 
         w_px = _pad(wi, var='w', axis=0, allow_lid=False)
         dw_dx = np.where(u_at_w > 0,
-                         (wi             - w_px[:-2, :, :]) / dx,
-                         (w_px[2:, :, :] - wi             ) / dx)
+                         (wi             - w_px[:-2, :, :]) / bdx_w,
+                         (w_px[2:, :, :] - wi             ) / fdx_w)
 
         w_py = _pad(wi, var='w', axis=1, allow_lid=False)
         dw_dy = np.where(v_at_w > 0,
-                         (wi              - w_py[:, :-2, :]) / dy,
-                         (w_py[:, 2:, :] - wi              ) / dy)
+                         (wi             - w_py[:, :-2, :]) / bdy_w,
+                         (w_py[:, 2:, :] - wi             ) / fdy_w)
 
-        d2w_dz2 = (w[:, :, 2:] - 2*wi + w[:, :, :-2]) / dz**2
-        d2w_dx2 = (w_px[2:, :, :] - 2*wi + w_px[:-2, :, :]) / dx**2
-        d2w_dy2 = (w_py[:, 2:, :] - 2*wi + w_py[:, :-2, :]) / dy**2
+        d2w_dz2 = 2.0 / (bdz_w + fdz_w) * (
+            (w[:, :, 2:] - wi) / fdz_w - (wi - w[:, :, :-2]) / bdz_w)
+        d2w_dx2 = 2.0 / (bdx_w + fdx_w) * (
+            (w_px[2:, :, :] - wi) / fdx_w - (wi - w_px[:-2, :, :]) / bdx_w)
+        d2w_dy2 = 2.0 / (bdy_w + fdy_w) * (
+            (w_py[:, 2:, :] - wi) / fdy_w - (wi - w_py[:, :-2, :]) / bdy_w)
 
         w_star[:, :, 1:-1] = wi + dt * (
             -u_at_w * dw_dx - v_at_w * dw_dy - wi * dw_dz
@@ -341,12 +422,11 @@ class Solver3D:
 
     def _solve_pressure(self, u_star, v_star, w_star) -> np.ndarray:
         nx, ny, nz = self.domain.nx, self.domain.ny, self.domain.nz
-        dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
         rho, dt = self.material.rho, self.dt
 
-        div = ((u_star[1:, :, :] - u_star[:-1, :, :]) / dx
-             + (v_star[:, 1:, :] - v_star[:, :-1, :]) / dy
-             + (w_star[:, :, 1:] - w_star[:, :, :-1]) / dz)  # (nx, ny, nz)
+        div = ((u_star[1:, :, :] - u_star[:-1, :, :]) * self._inv_dx_cell
+             + (v_star[:, 1:, :] - v_star[:, :-1, :]) * self._inv_dy_cell
+             + (w_star[:, :, 1:] - w_star[:, :, :-1]) * self._inv_dz_cell)  # (nx,ny,nz)
 
         rhs = (rho / dt) * div.ravel(order='F') + self._rhs_bc
         rhs[self._dirichlet_mask] = 0.0
@@ -367,16 +447,17 @@ class Solver3D:
         return p_flat.reshape((nx, ny, nz), order='F')
 
     def _correct_velocity(self, u_star, v_star, w_star, p):
-        dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
         dt, rho = self.dt, self.material.rho
         α = self.relax
 
         u_new = u_star.copy()
         v_new = v_star.copy()
         w_new = w_star.copy()
-        u_new[1:-1, :, :] -= α * (dt / rho) * (p[1:,  :,  :] - p[:-1, :,  :]) / dx
-        v_new[:,  1:-1, :] -= α * (dt / rho) * (p[:,  1:,  :] - p[:,  :-1, :]) / dy
-        w_new[:,  :, 1:-1] -= α * (dt / rho) * (p[:,  :,  1:] - p[:,  :, :-1]) / dz
+        # Pressure gradient at an interior face uses the cell-centre-to-centre
+        # distance ½·(dx[i-1] + dx[i]), not the cell width.
+        u_new[1:-1, :, :] -= α * (dt / rho) * (p[1:,  :,  :] - p[:-1, :,  :]) / self._dx_pcorr
+        v_new[:,  1:-1, :] -= α * (dt / rho) * (p[:,  1:,  :] - p[:,  :-1, :]) / self._dy_pcorr
+        w_new[:,  :, 1:-1] -= α * (dt / rho) * (p[:,  :,  1:] - p[:,  :, :-1]) / self._dz_pcorr
         return u_new, v_new, w_new
 
     # ------------------------------------------------------------------ #
@@ -388,15 +469,25 @@ class Solver3D:
         Build 3-D Laplacian for ∇²p = rhs using Kronecker products.
 
         Column-major ordering: k = i + j*nx + kz*nx*ny.  All nx × ny × nz
-        cells are real fluid; walls live on the bounding faces.  The 1-D
-        Neumann Laplacian (-1/h² at endpoints) encodes ∂p/∂n = 0 at walls
-        automatically.
+        cells are real fluid; walls live on the bounding faces.  Each
+        1-D Laplacian is a finite-volume discretisation that handles
+        non-uniform cell widths:
 
-        Outlet cells and solid cells get identity rows (Dirichlet p=0).
-        Closed cavity: one cell pinned to p=0.
+            L[i, i-1] = 1 / (dx[i] · ½(dx[i-1] + dx[i]))
+            L[i, i+1] = 1 / (dx[i] · ½(dx[i]   + dx[i+1]))
+            L[i, i]   = −(above two)
+
+        At i=0 / i=n−1 the missing-neighbour term is dropped — that is the
+        Neumann ∂p/∂n = 0 wall condition.  On a uniform grid every entry
+        reduces to ±1/h² and matches the previous scalar formulation.
+
+        Outlet / solid cells get identity rows (Dirichlet p=0);
+        a closed cavity pins one free cell to p=0.
         """
         nx, ny, nz = self.domain.nx, self.domain.ny, self.domain.nz
-        dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
+        dx_arr = self.domain.dx_arr
+        dy_arr = self.domain.dy_arr
+        dz_arr = self.domain.dz_arr
         bct = self.domain.bc_type
         N   = nx * ny * nz
 
@@ -406,16 +497,22 @@ class Solver3D:
         outlet_bottom = bct.get('bottom') in ('outlet', 'outlet_v')
         has_outlet    = outlet_right or outlet_left or outlet_top or outlet_bottom
 
-        # ---- 1-D Neumann Laplacians ----
-        def _neumann_lap(n, h):
-            d = np.full(n, -2.0 / h**2)
-            d[0] = d[-1] = -1.0 / h**2
-            off = np.ones(n - 1) / h**2
-            return spdiags([off, d, off], [-1, 0, 1], shape=(n, n), format='csr')
+        # ---- 1-D Laplacians with Neumann BC, non-uniform spacing aware ----
+        def _nonuniform_lap_1d(spacing):
+            n = spacing.size
+            ax_minus = np.zeros(n)
+            ax_plus  = np.zeros(n)
+            if n >= 2:
+                h_face       = 0.5 * (spacing[:-1] + spacing[1:])
+                ax_minus[1:] = 1.0 / (spacing[1:]  * h_face)
+                ax_plus[:-1] = 1.0 / (spacing[:-1] * h_face)
+            diag = -(ax_minus + ax_plus)
+            return spdiags([ax_minus[1:], diag, ax_plus[:-1]],
+                           [-1, 0, 1], shape=(n, n), format='csr')
 
-        Tx = _neumann_lap(nx, dx)
-        Ty = _neumann_lap(ny, dy)
-        Tz = _neumann_lap(nz, dz)
+        Tx = _nonuniform_lap_1d(dx_arr)
+        Ty = _nonuniform_lap_1d(dy_arr)
+        Tz = _nonuniform_lap_1d(dz_arr)
         Ix = speye(nx, format='csr')
         Iy = speye(ny, format='csr')
         Iz = speye(nz, format='csr')

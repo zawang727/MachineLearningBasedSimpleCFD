@@ -70,6 +70,25 @@ Stretching specs:
 A file with no `---` separator is parsed as a plain ASCII map with all
 defaults — preserves the legacy embedded-string layout.
 
+**3-D `.cfd` files** add `nz`, `Lz`, and `z_axis` to the header.  The 2-D
+ASCII map after `---` is extruded `nz` times in z; front and back walls
+default to no-slip.  The presence of `nz:` in the header tells
+`cases/run.py` to dispatch through `Domain3D` / `Solver3D` instead of the
+2-D path.
+
+```
+# cases/lid_driven_cavity_3d.cfd
+rho: 1.0
+nu:  0.01
+lid_u: 1.0
+Lx: 1.0  Ly: 1.0  Lz: 1.0
+nz: 16
+y_axis: tanh beta=2.5
+z_axis: tanh beta=1.5
+---
+<2-D map>
+```
+
 ## ASCII Map Interface
 
 Define geometry by writing a text map. Each character sets a cell or face type:
