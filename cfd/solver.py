@@ -51,12 +51,16 @@ class Solver:
     """
     2-D incompressible Navier-Stokes — Chorin projection on MAC staggered grid.
 
-    Grid layout:
-      u[i, j]  x-velocity at right face of cell (i-1, j)   shape (nx+1, ny)
-      v[i, j]  y-velocity at top  face of cell (i, j-1)    shape (nx, ny+1)
-      p[i, j]  pressure   at cell centre (i, j)            shape (nx, ny)
+    Grid layout (all nx × ny cells are real fluid):
+      p[i, j]  pressure   at cell centre (i+0.5, j+0.5)*dx  shape (nx, ny)
+      u[i, j]  x-velocity at right face of cell (i-1, j)    shape (nx+1, ny)
+      v[i, j]  y-velocity at top  face of cell (i, j-1)     shape (nx, ny+1)
 
-    Index 0 = leftmost/bottommost boundary face.
+    Walls live on u-faces i=0, i=nx and v-faces j=0, j=ny, i.e. on the outer
+    boundary of the unit domain [0, Lx] × [0, Ly].  Stencil ghosts for the
+    interior u-faces (which sit at y = (j+0.5)*dy and need values at y = ±0.5dy
+    when j=0 or j=ny-1) are built inline in _advect_diffuse from the wall BC,
+    not stored in the arrays.
     """
 
     def __init__(self, domain: Domain, material: Material,
@@ -133,6 +137,8 @@ class Solver:
         dx, dy = self.domain.dx, self.domain.dy
         nu, dt = self.material.nu, self.dt
         u, v   = self.u, self.v     # (nx+1,ny), (nx,ny+1)
+        bct    = self.domain.bc_type
+        lid_u  = float(self.domain.bc_values.get('lid_u', 0.0))
 
         u_star = u.copy()
         v_star = v.copy()
@@ -140,23 +146,31 @@ class Solver:
         # ---- Update u[1:-1, :]: interior x-faces (nx-1, ny) ----
         ui = u[1:-1, :]   # (nx-1, ny)
 
-        # v interpolated to u-face positions (i=1..nx-1, j=0..ny-1)
-        # v[k, j] is at x=(k+0.5)*dx; u-face at i*dx, (j+0.5)*dy
-        # 4-point average: k=i-1,i  ×  j, j+1
-        v_at_u = 0.25 * (v[:-1, :-1] + v[:-1, 1:] + v[1:, :-1] + v[1:, 1:])  # (nx-1, ny)
+        # v interpolated to u-face positions (4-point average).
+        v_at_u = 0.25 * (v[:-1, :-1] + v[:-1, 1:] + v[1:, :-1] + v[1:, 1:])
 
-        # Upwind ∂u/∂x
         du_dx = np.where(ui > 0,
                          (u[1:-1, :] - u[:-2,  :]) / dx,
                          (u[2:,   :] - u[1:-1, :]) / dx)
 
-        # Upwind ∂u/∂y  — pad u in y with edge values
-        u_py = np.pad(ui, ((0, 0), (1, 1)), mode='edge')   # (nx-1, ny+2)
+        # y-ghost rows for u-stencil. u-faces sit at y=(j+0.5)*dy; the walls
+        # are below j=0 (y=0) and above j=ny-1 (y=L). Reflect across them:
+        #   no_slip: u_ghost = -u_adjacent  →  u(wall) = 0
+        #   lid    : u_ghost = 2*lid_u - u_adjacent  →  u(wall) = lid_u
+        #   else   : zero-gradient (outlet / inlet / free-slip)
+        def _u_ghost_y(side):
+            ref = ui[:, 0:1] if side == 'bottom' else ui[:, -1:]
+            bt  = bct.get(side, 'no_slip')
+            if bt == 'no_slip': return -ref
+            if bt == 'lid':     return 2.0 * lid_u - ref
+            return ref
+
+        u_py = np.concatenate([_u_ghost_y('bottom'), ui, _u_ghost_y('top')],
+                              axis=1)   # (nx-1, ny+2)
         du_dy = np.where(v_at_u > 0,
                          (ui           - u_py[:, :-2]) / dy,
                          (u_py[:, 2:]  - ui           ) / dy)
 
-        # Diffusion ∇²u
         d2u_dx2 = (u[2:, :] - 2*ui + u[:-2, :]) / dx**2
         d2u_dy2 = (u_py[:, 2:] - 2*ui + u_py[:, :-2]) / dy**2
 
@@ -166,27 +180,20 @@ class Solver:
         # ---- Update v[:, 1:-1]: interior y-faces (nx, ny-1) ----
         vi = v[:, 1:-1]   # (nx, ny-1)
 
-        # u interpolated to v-face positions (i=0..nx-1, j=1..ny-1)
-        # u-face at i*dx, (j+0.5)*dy; v-face at (i+0.5)*dx, j*dy
-        # 4-point average: i, i+1  ×  j-1, j
-        u_at_v = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])  # (nx, ny-1)
+        u_at_v = 0.25 * (u[:-1, :-1] + u[:-1, 1:] + u[1:, :-1] + u[1:, 1:])
 
-        # Upwind ∂v/∂y
         dv_dy = np.where(vi > 0,
                          (v[:, 1:-1] - v[:, :-2]) / dy,
                          (v[:, 2:]   - v[:, 1:-1]) / dy)
 
-        # Upwind ∂v/∂x — anti-symmetric ghost at no-slip walls (no-slip: v=0 at wall)
-        # Neumann (edge) elsewhere (inlet/outlet).
-        _bct = self.domain.bc_type
-        v_left  = -vi[0:1,  :] if _bct.get('left')  == 'no_slip' else vi[0:1,  :]
-        v_right = -vi[-1:,  :] if _bct.get('right') == 'no_slip' else vi[-1:,  :]
+        # x-ghost columns for v-stencil — anti-symmetric for no_slip walls.
+        v_left  = -vi[0:1,  :] if bct.get('left')  == 'no_slip' else vi[0:1,  :]
+        v_right = -vi[-1:,  :] if bct.get('right') == 'no_slip' else vi[-1:,  :]
         v_px = np.concatenate([v_left, vi, v_right], axis=0)   # (nx+2, ny-1)
         dv_dx = np.where(u_at_v > 0,
                          (vi           - v_px[:-2, :]) / dx,
                          (v_px[2:, :]  - vi           ) / dx)
 
-        # Diffusion ∇²v
         d2v_dy2 = (v[:, 2:] - 2*vi + v[:, :-2]) / dy**2
         d2v_dx2 = (v_px[2:, :] - 2*vi + v_px[:-2, :]) / dx**2
 
@@ -200,48 +207,41 @@ class Solver:
     # ------------------------------------------------------------------ #
 
     def _apply_bc(self, u: np.ndarray, v: np.ndarray) -> None:
+        """
+        Enforce velocity BCs on faces that sit ON walls:
+          u-faces at i=0  (left  wall),  i=nx  (right wall)
+          v-faces at j=0  (bottom wall), j=ny  (top   wall)
+        All other u/v values are real fluid degrees of freedom; the stencil
+        ghosts for diffusion/advection are built inline in _advect_diffuse.
+        """
         bct = self.domain.bc_type
         bcv = self.domain.bc_values
         u_in  = float(bcv.get('inlet_u', 0.0))
         v_in  = float(bcv.get('inlet_v', 0.0))
-        lid_u = float(bcv.get('lid_u',   0.0))
 
-        # Left (i=0 u-face)
         bt = bct.get('left', 'no_slip')
         if bt == 'inlet':
             u[0, :] = u_in
-            v[0, 1:-1] = 0.0
         else:
             u[0, :] = 0.0
 
-        # Right (i=nx u-face)
         bt = bct.get('right', 'no_slip')
         if bt == 'outlet':
             u[-1, :] = u[-2, :]        # zero-gradient
         else:
             u[-1, :] = 0.0
 
-        # Bottom (j=0 v-face)
         bt = bct.get('bottom', 'no_slip')
-        if bt == 'no_slip':
-            v[:, 0] = 0.0
-            u[1:-1, 0] = -u[1:-1, 1]   # no-slip ghost: u=0 at wall
-        elif bt == 'lid':
-            v[:, 0] = 0.0
-            u[1:-1, 0] = 2.0 * lid_u - u[1:-1, 1]
-        elif bt == 'inlet_v':
+        if bt == 'inlet_v':
             v[:, 0] = v_in
+        else:
+            v[:, 0] = 0.0              # no_slip or lid (lid only moves in x)
 
-        # Top (j=ny v-face)
         bt = bct.get('top', 'no_slip')
-        if bt == 'no_slip':
-            v[:, -1] = 0.0
-            u[1:-1, -1] = -u[1:-1, -2]
-        elif bt == 'lid':
-            v[:, -1] = 0.0
-            u[1:-1, -1] = 2.0 * lid_u - u[1:-1, -2]
-        elif bt in ('outlet', 'outlet_v'):
+        if bt in ('outlet', 'outlet_v'):
             v[:, -1] = v[:, -2]
+        else:
+            v[:, -1] = 0.0
 
     def _mask_solid(self, u: np.ndarray, v: np.ndarray) -> None:
         solid = self.domain.solid    # (nx, ny) bool
@@ -298,24 +298,18 @@ class Solver:
         """
         Build LU-factored sparse Laplacian for  ∇²p = rhs.
 
-        Wall y-ghost rows (j=0 bottom, j=ny-1 top for no_slip/lid) are
-        constrained to equal their neighbour: p[ghost] = p[real].
-        This prevents ghost-row artifacts from driving spurious v corrections.
+        All nx × ny pressure cells are real fluid cells; walls live on the
+        u/v faces at i=0, i=nx and j=0, j=ny.
 
         Boundary conditions:
-          Neumann (∂p/∂n = 0) at walls/inlets → reduces diagonal.
-          Dirichlet (p = 0) at outlet face cells.
-          Ghost-row constraint  p[j=0] = p[j=1]  (and top equivalent).
-          Closed cavity: pin p=0 at one interior cell.
+          Neumann (∂p/∂n = 0) at walls / inlets / lids   → reduces diagonal.
+          Dirichlet (p = 0)   at outlet face cells.
+          Closed cavity (no outlet): pin p=0 at one cell.
         """
         nx, ny = self.domain.nx, self.domain.ny
         dx, dy = self.domain.dx, self.domain.dy
         bct    = self.domain.bc_type
         n      = nx * ny
-
-        _wall = ('no_slip', 'lid')
-        ghost_bottom = bct.get('bottom') in _wall
-        ghost_top    = bct.get('top')    in _wall
 
         outlet_right  = bct.get('right')  == 'outlet'
         outlet_top    = bct.get('top')    in ('outlet', 'outlet_v')
@@ -330,13 +324,6 @@ class Solver:
             if outlet_bottom and j == 0:      return True
             return False
 
-        def _is_ghost(i, j):
-            """Ghost rows: u-mirror rows at horizontal walls (treated as constraint cells)."""
-            if ghost_bottom and j == 0:      return True
-            if ghost_top    and j == ny - 1: return True
-            return False
-
-        # k(i,j) = i + j*nx   (Fortran / column-major order)
         L   = lil_matrix((n, n))
         rhs = np.zeros(n)
 
@@ -348,75 +335,34 @@ class Solver:
                     L[k, k] = 1.0
                     continue
 
-                if _is_ghost(i, j):
-                    # Constraint: p[ghost] = p[adjacent real row]
-                    # → L p[ghost] - p[real] = 0
-                    L[k, k] = 1.0
-                    if j == 0:
-                        L[k, i + 1 * nx] = -1.0   # p[j=0] = p[j=1]
-                    else:
-                        L[k, i + (ny-2) * nx] = -1.0  # p[j=ny-1] = p[j=ny-2]
-                    continue
-
                 c = 0.0
-
-                # x-neighbours
                 if i > 0:
-                    if _is_outlet(i-1, j):
-                        rhs[k] -= 0.0 / dx**2
-                    else:
+                    if not _is_outlet(i-1, j):
                         L[k, (i-1) + j*nx] += 1.0 / dx**2
                     c -= 1.0 / dx**2
-                # else: Neumann at left wall
-
                 if i < nx - 1:
-                    if _is_outlet(i+1, j):
-                        rhs[k] -= 0.0 / dx**2
-                    else:
+                    if not _is_outlet(i+1, j):
                         L[k, (i+1) + j*nx] += 1.0 / dx**2
                     c -= 1.0 / dx**2
-                # else: Neumann at right wall
-
-                # y-neighbours — ghost rows are coupled normally; the ghost
-                # constraint rows (L p[ghost] = p[real]) handle p[ghost]=p[real].
                 if j > 0:
-                    if _is_outlet(i, j-1):
-                        rhs[k] -= 0.0 / dy**2
-                    else:
+                    if not _is_outlet(i, j-1):
                         L[k, i + (j-1)*nx] += 1.0 / dy**2
                     c -= 1.0 / dy**2
-                # else: Neumann at bottom
-
                 if j < ny - 1:
-                    if _is_outlet(i, j+1):
-                        rhs[k] -= 0.0 / dy**2
-                    else:
+                    if not _is_outlet(i, j+1):
                         L[k, i + (j+1)*nx] += 1.0 / dy**2
                     c -= 1.0 / dy**2
-                # else: Neumann at top
 
                 L[k, k] = c if c != 0.0 else -1.0
 
-        # Dirichlet mask: outlets + ghost rows (constraint rows)
         dirichlet_mask = np.zeros(n, dtype=bool)
         for j in range(ny):
             for i in range(nx):
-                if _is_outlet(i, j) or _is_ghost(i, j):
+                if _is_outlet(i, j):
                     dirichlet_mask[i + j * nx] = True
 
-        # Closed cavity (no outlet): pin p=0 at one non-ghost interior cell
         if not has_outlet:
-            # Find first non-ghost cell
-            pin_k = None
-            for j in range(ny):
-                for i in range(nx):
-                    if not _is_ghost(i, j):
-                        pin_k = i + j * nx
-                        break
-                if pin_k is not None:
-                    break
-            if pin_k is None:
-                pin_k = 0
+            pin_k = 0
             L[pin_k, :] = 0.0
             L[pin_k, pin_k] = 1.0
             rhs[pin_k]  = 0.0

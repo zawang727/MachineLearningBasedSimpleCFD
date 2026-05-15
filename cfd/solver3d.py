@@ -47,15 +47,17 @@ class Solver3D:
     """
     3-D incompressible Navier-Stokes — Chorin projection on MAC staggered grid.
 
-    Grid layout (column-major cell index k = i + j*nx + kz*nx*ny):
+    Grid layout (column-major cell index k = i + j*nx + kz*nx*ny);
+    all nx × ny × nz pressure cells are real fluid cells:
       u[i,j,k]  x-velocity at right  x-face of cell (i-1,j,k)   (nx+1, ny, nz)
       v[i,j,k]  y-velocity at top    y-face of cell (i,j-1,k)   (nx, ny+1, nz)
       w[i,j,k]  z-velocity at front  z-face of cell (i,j,k-1)   (nx, ny, nz+1)
       p[i,j,k]  pressure at cell centre (i,j,k)                  (nx, ny, nz)
 
-    Ghost rows:
-      j=0, j=ny-1 in u and w mirror adjacent real rows for top/bottom walls.
-      k=0, k=nz-1 in u and v mirror adjacent real layers for front/back walls.
+    Walls live on the boundary faces (u at i=0,nx; v at j=0,ny; w at k=0,nz)
+    of the unit-aligned domain [0,Lx]×[0,Ly]×[0,Lz].  Stencil ghosts for the
+    interior u/v/w-faces that need values one cell beyond a wall are built
+    inline in _advect_diffuse from the BC type, not stored in the arrays.
 
     Pressure solver:
       N ≤ 32768 (~32^3): pre-factored LU (splu), fast per-step.
@@ -152,39 +154,62 @@ class Solver3D:
         dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
         nu, dt = self.material.nu, self.dt
         u, v, w = self.u, self.v, self.w
-        bct = self.domain.bc_type
+        bct    = self.domain.bc_type
+        lid_u  = float(self.domain.bc_values.get('lid_u', 0.0))
 
         u_star = u.copy()
         v_star = v.copy()
         w_star = w.copy()
 
+        # Map (variable, axis) → (low-wall name, high-wall name).  Each interior
+        # face array needs an image one cell beyond the two walls parallel to
+        # the stencil axis:
+        #   no_slip → anti-symmetric image (wall velocity = 0)
+        #   lid     → 2 lid_u − image  (wall x-velocity = lid_u; u only)
+        #   else    → zero-gradient (outlet / inlet / free-slip)
+        WALL_OF = {
+            ('u', 1): ('bottom', 'top'),   ('u', 2): ('front', 'back'),
+            ('v', 0): ('left',   'right'), ('v', 2): ('front', 'back'),
+            ('w', 0): ('left',   'right'), ('w', 1): ('bottom', 'top'),
+        }
+
+        def _pad(arr, var, axis, allow_lid):
+            low_name, high_name = WALL_OF[(var, axis)]
+            lo_ref = np.take(arr, [0],                   axis=axis)
+            hi_ref = np.take(arr, [arr.shape[axis] - 1], axis=axis)
+
+            def _image(ref, name):
+                bt = bct.get(name, 'no_slip')
+                if bt == 'no_slip':              return -ref
+                if bt == 'lid' and allow_lid:    return 2.0 * lid_u - ref
+                return ref                       # outlet / inlet / free-slip
+
+            return np.concatenate(
+                [_image(lo_ref, low_name), arr, _image(hi_ref, high_name)],
+                axis=axis,
+            )
+
         # ---- u[1:-1, :, :]: interior x-faces  (nx-1, ny, nz) ----
         ui = u[1:-1, :, :]
 
-        # v interpolated to u-face: avg over x(i-1,i) and y(j,j+1)
         v_at_u = 0.25 * (v[:-1, :-1, :] + v[:-1, 1:, :] +
-                         v[1:,  :-1, :] + v[1:,  1:, :])  # (nx-1, ny, nz)
-
-        # w interpolated to u-face: avg over x(i-1,i) and z(k,k+1)
+                         v[1:,  :-1, :] + v[1:,  1:, :])
         w_at_u = 0.25 * (w[:-1, :, :-1] + w[:-1, :, 1:] +
-                         w[1:,  :, :-1] + w[1:,  :, 1:])  # (nx-1, ny, nz)
+                         w[1:,  :, :-1] + w[1:,  :, 1:])
 
-        # upwind ∂u/∂x
         du_dx = np.where(ui > 0,
                          (u[1:-1, :, :] - u[:-2, :, :]) / dx,
                          (u[2:,   :, :] - u[1:-1, :, :]) / dx)
 
-        # upwind ∂u/∂y — edge-pad in y (uses ghost rows j=0,ny-1 set by BC)
-        u_py = np.pad(ui, ((0, 0), (1, 1), (0, 0)), mode='edge')
+        u_py = _pad(ui, var='u', axis=1, allow_lid=True)
         du_dy = np.where(v_at_u > 0,
-                         (ui - u_py[:, :-2, :]) / dy,
-                         (u_py[:, 2:, :] - ui) / dy)
+                         (ui              - u_py[:, :-2, :]) / dy,
+                         (u_py[:, 2:, :] - ui              ) / dy)
 
-        # upwind ∂u/∂z — edge-pad in z (uses ghost layers k=0,nz-1)
-        u_pz = np.pad(ui, ((0, 0), (0, 0), (1, 1)), mode='edge')
+        u_pz = _pad(ui, var='u', axis=2, allow_lid=False)
         du_dz = np.where(w_at_u > 0,
-                         (ui - u_pz[:, :, :-2]) / dz,
-                         (u_pz[:, :, 2:] - ui) / dz)
+                         (ui              - u_pz[:, :, :-2]) / dz,
+                         (u_pz[:, :, 2:] - ui              ) / dz)
 
         d2u_dx2 = (u[2:,   :, :] - 2*ui + u[:-2, :, :]) / dx**2
         d2u_dy2 = (u_py[:, 2:, :] - 2*ui + u_py[:, :-2, :]) / dy**2
@@ -197,38 +222,24 @@ class Solver3D:
         # ---- v[:, 1:-1, :]: interior y-faces  (nx, ny-1, nz) ----
         vi = v[:, 1:-1, :]
 
-        # u interpolated to v-face: avg over x(i,i+1) and y(j-1,j)
         u_at_v = 0.25 * (u[:-1, :-1, :] + u[:-1, 1:, :] +
-                         u[1:,  :-1, :] + u[1:,  1:, :])  # (nx, ny-1, nz)
-
-        # w interpolated to v-face: avg over y(j-1,j) and z(k,k+1)
+                         u[1:,  :-1, :] + u[1:,  1:, :])
         w_at_v = 0.25 * (w[:, :-1, :-1] + w[:, :-1, 1:] +
-                         w[:, 1:,  :-1] + w[:, 1:,  1:])  # (nx, ny-1, nz)
+                         w[:, 1:,  :-1] + w[:, 1:,  1:])
 
-        # upwind ∂v/∂y
         dv_dy = np.where(vi > 0,
                          (v[:, 1:-1, :] - v[:, :-2, :]) / dy,
                          (v[:, 2:,   :] - v[:, 1:-1, :]) / dy)
 
-        # upwind ∂v/∂x — anti-symmetric ghost at no-slip left/right walls
-        v_left  = (-vi[0:1,  :, :] if bct.get('left')  == 'no_slip'
-                   else vi[0:1, :, :])
-        v_right = (-vi[-1:,  :, :] if bct.get('right') == 'no_slip'
-                   else vi[-1:, :, :])
-        v_px = np.concatenate([v_left, vi, v_right], axis=0)  # (nx+2, ny-1, nz)
+        v_px = _pad(vi, var='v', axis=0, allow_lid=False)
         dv_dx = np.where(u_at_v > 0,
-                         (vi - v_px[:-2, :, :]) / dx,
-                         (v_px[2:, :, :] - vi) / dx)
+                         (vi             - v_px[:-2, :, :]) / dx,
+                         (v_px[2:, :, :] - vi             ) / dx)
 
-        # upwind ∂v/∂z — anti-symmetric ghost at no-slip front/back walls
-        v_front = (-vi[:, :, 0:1] if bct.get('front') == 'no_slip'
-                   else vi[:, :, 0:1])
-        v_back  = (-vi[:, :, -1:] if bct.get('back')  == 'no_slip'
-                   else vi[:, :, -1:])
-        v_pz = np.concatenate([v_front, vi, v_back], axis=2)  # (nx, ny-1, nz+2)
+        v_pz = _pad(vi, var='v', axis=2, allow_lid=False)
         dv_dz = np.where(w_at_v > 0,
-                         (vi - v_pz[:, :, :-2]) / dz,
-                         (v_pz[:, :, 2:] - vi) / dz)
+                         (vi             - v_pz[:, :, :-2]) / dz,
+                         (v_pz[:, :, 2:] - vi             ) / dz)
 
         d2v_dy2 = (v[:, 2:, :] - 2*vi + v[:, :-2, :]) / dy**2
         d2v_dx2 = (v_px[2:, :, :] - 2*vi + v_px[:-2, :, :]) / dx**2
@@ -241,34 +252,24 @@ class Solver3D:
         # ---- w[:, :, 1:-1]: interior z-faces  (nx, ny, nz-1) ----
         wi = w[:, :, 1:-1]
 
-        # u interpolated to w-face: avg over x(i,i+1) and z(k-1,k)
         u_at_w = 0.25 * (u[:-1, :, :-1] + u[:-1, :, 1:] +
-                         u[1:,  :, :-1] + u[1:,  :, 1:])  # (nx, ny, nz-1)
-
-        # v interpolated to w-face: avg over y(j,j+1) and z(k-1,k)
+                         u[1:,  :, :-1] + u[1:,  :, 1:])
         v_at_w = 0.25 * (v[:, :-1, :-1] + v[:, :-1, 1:] +
-                         v[:, 1:,  :-1] + v[:, 1:,  1:])  # (nx, ny, nz-1)
+                         v[:, 1:,  :-1] + v[:, 1:,  1:])
 
-        # upwind ∂w/∂z
         dw_dz = np.where(wi > 0,
                          (w[:, :, 1:-1] - w[:, :, :-2]) / dz,
                          (w[:, :, 2:]   - w[:, :, 1:-1]) / dz)
 
-        # upwind ∂w/∂x — anti-symmetric ghost at no-slip left/right walls
-        w_left  = (-wi[0:1, :, :] if bct.get('left')  == 'no_slip'
-                   else wi[0:1, :, :])
-        w_right = (-wi[-1:, :, :] if bct.get('right') == 'no_slip'
-                   else wi[-1:, :, :])
-        w_px = np.concatenate([w_left, wi, w_right], axis=0)  # (nx+2, ny, nz-1)
+        w_px = _pad(wi, var='w', axis=0, allow_lid=False)
         dw_dx = np.where(u_at_w > 0,
-                         (wi - w_px[:-2, :, :]) / dx,
-                         (w_px[2:, :, :] - wi) / dx)
+                         (wi             - w_px[:-2, :, :]) / dx,
+                         (w_px[2:, :, :] - wi             ) / dx)
 
-        # upwind ∂w/∂y — edge-pad in y (uses ghost y-rows in wi)
-        w_py = np.pad(wi, ((0, 0), (1, 1), (0, 0)), mode='edge')
+        w_py = _pad(wi, var='w', axis=1, allow_lid=False)
         dw_dy = np.where(v_at_w > 0,
-                         (wi - w_py[:, :-2, :]) / dy,
-                         (w_py[:, 2:, :] - wi) / dy)
+                         (wi              - w_py[:, :-2, :]) / dy,
+                         (w_py[:, 2:, :] - wi              ) / dy)
 
         d2w_dz2 = (w[:, :, 2:] - 2*wi + w[:, :, :-2]) / dz**2
         d2w_dx2 = (w_px[2:, :, :] - 2*wi + w_px[:-2, :, :]) / dx**2
@@ -285,64 +286,44 @@ class Solver3D:
     # ------------------------------------------------------------------ #
 
     def _apply_bc(self, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> None:
+        """
+        Enforce velocity BCs on faces that sit ON walls:
+          u-faces at i=0 / i=nx           (left / right walls)
+          v-faces at j=0 / j=ny           (bottom / top walls)
+          w-faces at k=0 / k=nz           (front / back walls)
+        All other u/v/w values are real interior fluid; stencil ghosts for
+        diffusion/advection are built inline in _advect_diffuse.
+        """
         bct = self.domain.bc_type
         bcv = self.domain.bc_values
-        u_in  = float(bcv.get('inlet_u', 0.0))
-        lid_u = float(bcv.get('lid_u',   0.0))
+        u_in = float(bcv.get('inlet_u', 0.0))
 
         # Left face (x=0)
-        bt = bct.get('left', 'no_slip')
-        if bt == 'inlet':
+        if bct.get('left', 'no_slip') == 'inlet':
             u[0, :, :] = u_in
-            v[0, :, :] = 0.0
-            w[0, :, :] = 0.0
         else:
             u[0, :, :] = 0.0
 
         # Right face (x=nx)
-        bt = bct.get('right', 'no_slip')
-        if bt == 'outlet':
+        if bct.get('right', 'no_slip') == 'outlet':
             u[-1, :, :] = u[-2, :, :]
         else:
             u[-1, :, :] = 0.0
 
-        # Bottom wall (y=0): v-face is ON the wall; u and w need ghost y-rows
-        bt = bct.get('bottom', 'no_slip')
-        if bt in ('no_slip',):
-            v[:, 0, :] = 0.0
-            u[1:-1, 0, :] = -u[1:-1, 1, :]
-            w[:,    0, 1:-1] = -w[:,    1, 1:-1]
-        elif bt == 'lid':
-            v[:, 0, :] = 0.0
-            u[1:-1, 0, :] = 2.0 * lid_u - u[1:-1, 1, :]
-            w[:,    0, 1:-1] = -w[:,    1, 1:-1]
+        # Bottom face (y=0): v is ON the wall (no normal flow); lid only
+        # moves in x, so v[:, 0, :] is still zero on a lid wall.
+        v[:, 0, :] = 0.0
 
-        # Top wall (y=ny)
-        bt = bct.get('top', 'no_slip')
-        if bt == 'no_slip':
-            v[:, -1, :] = 0.0
-            u[1:-1, -1, :] = -u[1:-1, -2, :]
-            w[:,    -1, 1:-1] = -w[:,    -2, 1:-1]
-        elif bt == 'lid':
-            v[:, -1, :] = 0.0
-            u[1:-1, -1, :] = 2.0 * lid_u - u[1:-1, -2, :]
-            w[:,    -1, 1:-1] = -w[:,    -2, 1:-1]
-        elif bt in ('outlet', 'outlet_v'):
+        # Top face (y=ny)
+        bt_top = bct.get('top', 'no_slip')
+        if bt_top in ('outlet', 'outlet_v'):
             v[:, -1, :] = v[:, -2, :]
+        else:
+            v[:, -1, :] = 0.0
 
-        # Front wall (z=0): w-face is ON the wall; u and v need ghost z-layers
-        bt = bct.get('front', 'no_slip')
-        if bt == 'no_slip':
-            w[:, :, 0] = 0.0
-            u[1:-1, :, 0] = -u[1:-1, :, 1]
-            v[:, 1:-1, 0] = -v[:, 1:-1, 1]
-
-        # Back wall (z=nz)
-        bt = bct.get('back', 'no_slip')
-        if bt == 'no_slip':
-            w[:, :, -1] = 0.0
-            u[1:-1, :, -1] = -u[1:-1, :, -2]
-            v[:, 1:-1, -1] = -v[:, 1:-1, -2]
+        # Front face (z=0) and back face (z=nz): w on the wall
+        w[:, :,  0] = 0.0
+        w[:, :, -1] = 0.0
 
     def _mask_solid(self, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> None:
         solid = self.domain.solid
@@ -406,11 +387,10 @@ class Solver3D:
         """
         Build 3-D Laplacian for ∇²p = rhs using Kronecker products.
 
-        Column-major ordering: k = i + j*nx + kz*nx*ny.
-
-        Ghost cells (j=0, j=ny-1 for walls; k=0, k=nz-1 for walls) are
-        handled by the Neumann boundary in the 1-D Laplacian plus zeroing
-        their RHS contribution — this enforces p[ghost] = p[adjacent].
+        Column-major ordering: k = i + j*nx + kz*nx*ny.  All nx × ny × nz
+        cells are real fluid; walls live on the bounding faces.  The 1-D
+        Neumann Laplacian (-1/h² at endpoints) encodes ∂p/∂n = 0 at walls
+        automatically.
 
         Outlet cells and solid cells get identity rows (Dirichlet p=0).
         Closed cavity: one cell pinned to p=0.
@@ -419,12 +399,6 @@ class Solver3D:
         dx, dy, dz = self.domain.dx, self.domain.dy, self.domain.dz
         bct = self.domain.bc_type
         N   = nx * ny * nz
-
-        _wall = ('no_slip', 'lid')
-        ghost_j0  = bct.get('bottom') in _wall
-        ghost_jny = bct.get('top')    in _wall
-        ghost_k0  = bct.get('front')  in _wall
-        ghost_knz = bct.get('back')   in _wall
 
         outlet_right  = bct.get('right')  == 'outlet'
         outlet_left   = bct.get('left')   == 'outlet'
@@ -454,18 +428,11 @@ class Solver3D:
 
         rhs = np.zeros(N)
 
-        # ---- Coordinate arrays for vectorised indexing ----
         Ia, Ja, Ka = np.mgrid[0:nx, 0:ny, 0:nz]
         Ia_f = Ia.ravel(); Ja_f = Ja.ravel(); Ka_f = Ka.ravel()
-        flat  = (Ia_f + Ja_f * nx + Ka_f * nx * ny).astype(np.intp)
+        flat = (Ia_f + Ja_f * nx + Ka_f * nx * ny).astype(np.intp)
 
         dirichlet_mask = np.zeros(N, dtype=bool)
-
-        # ---- Ghost cells: mark RHS = 0 (Neumann kron handles the constraint) ----
-        if ghost_j0:  dirichlet_mask[flat[Ja_f == 0]]     = True
-        if ghost_jny: dirichlet_mask[flat[Ja_f == ny - 1]] = True
-        if ghost_k0:  dirichlet_mask[flat[Ka_f == 0]]     = True
-        if ghost_knz: dirichlet_mask[flat[Ka_f == nz - 1]] = True
 
         def _set_dirichlet(idx_arr):
             for k in idx_arr.tolist():
@@ -473,19 +440,16 @@ class Solver3D:
                 L.data[k] = [1.0]
             dirichlet_mask[idx_arr] = True
 
-        # ---- Outlet faces: Dirichlet p = 0 ----
         if outlet_right:  _set_dirichlet(flat[Ia_f == nx - 1])
         if outlet_left:   _set_dirichlet(flat[Ia_f == 0])
         if outlet_top:    _set_dirichlet(flat[Ja_f == ny - 1])
         if outlet_bottom: _set_dirichlet(flat[Ja_f == 0])
 
-        # ---- Solid cells: Dirichlet p = 0 ----
         solid_flat = self.domain.solid.ravel(order='F')
         solid_idx  = flat[solid_flat]
         if solid_idx.size > 0:
             _set_dirichlet(solid_idx)
 
-        # ---- Closed cavity: pin one free cell to p = 0 ----
         if not has_outlet:
             free = flat[~dirichlet_mask]
             if free.size > 0:
