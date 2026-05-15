@@ -20,9 +20,9 @@ def plot_velocity_3d(state, title: str = "", save_path: str = "") -> None:
     Right: xz-midplane  (j  = ny//2)
     """
     dom = state.domain
-    x = (np.arange(dom.nx) + 0.5) * dom.dx
-    y = (np.arange(dom.ny) + 0.5) * dom.dy
-    z = (np.arange(dom.nz) + 0.5) * dom.dz
+    x = dom.x_cell
+    y = dom.y_cell
+    z = dom.z_cell
 
     speed = state.speed  # (nx, ny, nz)
     spd_xy = _mid(speed, axis=2).T    # (ny, nx) for contourf(x, y, ...)
@@ -60,9 +60,9 @@ def plot_fields_3d(state, title: str = "", save_path: str = "") -> None:
                cols = xy-midplane / xz-midplane
     """
     dom = state.domain
-    x = (np.arange(dom.nx) + 0.5) * dom.dx
-    y = (np.arange(dom.ny) + 0.5) * dom.dy
-    z = (np.arange(dom.nz) + 0.5) * dom.dz
+    x = dom.x_cell
+    y = dom.y_cell
+    z = dom.z_cell
 
     fields = [
         (state.speed,  'Speed',    'viridis',  'Speed [m/s]',    False),
@@ -120,8 +120,8 @@ def plot_comparison_3d(
     4×2 comparison: rows = u/v/w/p, cols = NN / CFD (xy midplane).
     """
     dom  = state_cfd.domain
-    x    = (np.arange(dom.nx) + 0.5) * dom.dx
-    y    = (np.arange(dom.ny) + 0.5) * dom.dy
+    x    = dom.x_cell
+    y    = dom.y_cell
 
     rows = [
         ('u-velocity', state_nn.u_cell, state_cfd.u_cell, 'RdBu_r'),
@@ -214,9 +214,9 @@ def plot_3d_slices(
     """
     dom = state.domain
     nx, ny, nz = dom.nx, dom.ny, dom.nz
-    x = (np.arange(nx) + 0.5) * dom.dx
-    y = (np.arange(ny) + 0.5) * dom.dy
-    z = (np.arange(nz) + 0.5) * dom.dz
+    x = dom.x_cell
+    y = dom.y_cell
+    z = dom.z_cell
 
     data = _get_field(state, field)   # (nx, ny, nz)
     vmax = float(np.abs(data).max()) or 1e-12
@@ -294,9 +294,9 @@ def plot_3d_vectors(
     """
     dom = state.domain
     nx, ny, nz = dom.nx, dom.ny, dom.nz
-    x = (np.arange(nx) + 0.5) * dom.dx
-    y = (np.arange(ny) + 0.5) * dom.dy
-    z = (np.arange(nz) + 0.5) * dom.dz
+    x = dom.x_cell
+    y = dom.y_cell
+    z = dom.z_cell
 
     if stride is None:
         stride = max(1, min(nx, ny, nz) // 6)
@@ -350,9 +350,9 @@ def plot_3d_case_summary(
     """
     dom = state.domain
     nx, ny, nz = dom.nx, dom.ny, dom.nz
-    x = (np.arange(nx) + 0.5) * dom.dx
-    y = (np.arange(ny) + 0.5) * dom.dy
-    z = (np.arange(nz) + 0.5) * dom.dz
+    x = dom.x_cell
+    y = dom.y_cell
+    z = dom.z_cell
 
     stride = max(1, min(nx, ny, nz) // 6)
     xi = np.arange(stride // 2, nx, stride)

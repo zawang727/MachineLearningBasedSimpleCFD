@@ -12,6 +12,27 @@ _EDGE_BC = {
 _SOLID = '*'
 
 
+def _as_spacing(value, n: int, name: str) -> np.ndarray:
+    """Normalise scalar / 1-D array spacing input to a positive (n,) ndarray."""
+    if np.isscalar(value):
+        return np.full(n, float(value), dtype=float)
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return np.full(n, float(arr), dtype=float)
+    if arr.shape != (n,):
+        raise ValueError(f"{name} array must have shape ({n},), got {arr.shape}")
+    if (arr <= 0).any():
+        raise ValueError(f"{name} must be strictly positive")
+    return arr
+
+
+def _scalar_summary(arr: np.ndarray) -> float:
+    """Single-value spacing accessor — uniform value if uniform, else mean."""
+    if np.allclose(arr, arr[0]):
+        return float(arr[0])
+    return float(arr.mean())
+
+
 class Domain:
     """
     2-D rectangular domain for MAC-grid NS solver.
@@ -20,6 +41,12 @@ class Domain:
       p[i, j]  pressure at cell centre            shape (nx, ny)
       u[i, j]  x-velocity at right face of (i,j)  shape (nx+1, ny)
       v[i, j]  y-velocity at top  face of (i,j)   shape (nx, ny+1)
+
+    Spacing: `dx` and `dy` may be a scalar (uniform mesh) or a 1-D array of
+    shape (nx,) / (ny,) for a stretched mesh.  The Domain always exposes the
+    per-axis spacing arrays (`dx_arr`, `dy_arr`) and cell / face coordinate
+    arrays (`x_cell`, `y_cell`, `x_face`, `y_face`) so downstream code can
+    work the same way on uniform and stretched grids.
 
     ASCII map orientation: top row = high y (j=ny-1), bottom = j=0.
 
@@ -37,13 +64,17 @@ class Domain:
     def __init__(
         self,
         nx: int, ny: int,
-        dx: float, dy: float,
+        dx: 'float | np.ndarray',
+        dy: 'float | np.ndarray',
         solid:     np.ndarray,    # (nx, ny) bool
         bc_type:   dict,          # 'left'/'right'/'top'/'bottom' → str
         bc_values: dict,          # 'inlet_u', 'inlet_v', 'lid_u', ...
     ) -> None:
         self.nx, self.ny   = nx, ny
-        self.dx, self.dy   = dx, dy
+        self.dx_arr        = _as_spacing(dx, nx, 'dx')   # (nx,)
+        self.dy_arr        = _as_spacing(dy, ny, 'dy')   # (ny,)
+        self.dx            = _scalar_summary(self.dx_arr)  # scalar accessor
+        self.dy            = _scalar_summary(self.dy_arr)
         self.solid         = solid.astype(bool)
         self.bc_type       = bc_type
         self.bc_values     = bc_values
@@ -58,6 +89,39 @@ class Domain:
         if bc_type.get('left')   == 'inlet':   self.inlet_u_map[0,  :] = u_in
         if bc_type.get('top')    == 'lid':     self.lid_u_map[:,  -1] = lid_u
         if bc_type.get('bottom') == 'lid':     self.lid_u_map[:,   0] = lid_u
+
+    # ------------------------------------------------------------------
+    # Mesh geometry — face positions, cell centres, total lengths.
+    # All derived from dx_arr / dy_arr so they are correct on stretched grids.
+    @property
+    def x_face(self) -> np.ndarray:
+        """u-face x positions (cell vertical edges), shape (nx+1,)."""
+        return np.concatenate(([0.0], np.cumsum(self.dx_arr)))
+
+    @property
+    def y_face(self) -> np.ndarray:
+        """v-face y positions (cell horizontal edges), shape (ny+1,)."""
+        return np.concatenate(([0.0], np.cumsum(self.dy_arr)))
+
+    @property
+    def x_cell(self) -> np.ndarray:
+        """Cell-centre x positions, shape (nx,)."""
+        xf = self.x_face
+        return 0.5 * (xf[:-1] + xf[1:])
+
+    @property
+    def y_cell(self) -> np.ndarray:
+        """Cell-centre y positions, shape (ny,)."""
+        yf = self.y_face
+        return 0.5 * (yf[:-1] + yf[1:])
+
+    @property
+    def Lx(self) -> float:
+        return float(self.dx_arr.sum())
+
+    @property
+    def Ly(self) -> float:
+        return float(self.dy_arr.sum())
 
     # ------------------------------------------------------------------
     @classmethod

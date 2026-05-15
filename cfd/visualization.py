@@ -9,11 +9,9 @@ def plot_velocity(state, title: str = "", save_path: str = "") -> None:
     uc = state.u_cell
     vc = state.v_cell
     spd = state.speed
-    nx, ny = state.domain.nx, state.domain.ny
-    dx, dy = state.domain.dx, state.domain.dy
 
-    x = (np.arange(nx) + 0.5) * dx
-    y = (np.arange(ny) + 0.5) * dy
+    x = state.domain.x_cell
+    y = state.domain.y_cell
 
     fig, ax = plt.subplots(figsize=(7, 5))
     cf = ax.contourf(x, y, spd.T, levels=20, cmap='viridis')
@@ -37,10 +35,8 @@ def plot_velocity(state, title: str = "", save_path: str = "") -> None:
 
 
 def plot_pressure(state, title: str = "", save_path: str = "") -> None:
-    nx, ny = state.domain.nx, state.domain.ny
-    dx, dy = state.domain.dx, state.domain.dy
-    x = (np.arange(nx) + 0.5) * dx
-    y = (np.arange(ny) + 0.5) * dy
+    x = state.domain.x_cell
+    y = state.domain.y_cell
 
     fig, ax = plt.subplots(figsize=(7, 5))
     cf = ax.contourf(x, y, state.p.T, levels=20, cmap='RdBu_r')
@@ -64,10 +60,8 @@ def plot_pressure(state, title: str = "", save_path: str = "") -> None:
 
 def plot_fields(state, title: str = "", save_path: str = "") -> None:
     """1×3 panel: speed | pressure | vorticity."""
-    nx, ny = state.domain.nx, state.domain.ny
-    dx, dy = state.domain.dx, state.domain.dy
-    x = (np.arange(nx) + 0.5) * dx
-    y = (np.arange(ny) + 0.5) * dy
+    x = state.domain.x_cell
+    y = state.domain.y_cell
 
     fields = [
         (state.speed.T,      'Speed',      'viridis',  'Speed [m/s]'),
@@ -111,10 +105,8 @@ def plot_comparison(
     Rows: u_cell | v_cell | pressure
     Cols: NN prediction | CFD solver
     """
-    nx, ny = state_cfd.domain.nx, state_cfd.domain.ny
-    dx, dy = state_cfd.domain.dx, state_cfd.domain.dy
-    x = (np.arange(nx) + 0.5) * dx
-    y = (np.arange(ny) + 0.5) * dy
+    x = state_cfd.domain.x_cell
+    y = state_cfd.domain.y_cell
 
     rows = [
         ('u-velocity',  state_nn.u_cell.T,  state_cfd.u_cell.T,  'RdBu_r'),
@@ -171,16 +163,19 @@ def plot_training_history(train_losses: list, val_losses: list, save_path: str =
 
 
 def _draw_solid(ax, domain, x, y) -> None:
-    """Overlay solid obstacles as grey patches."""
+    """Overlay solid obstacles as grey patches (works on stretched grids)."""
     if not domain.solid.any():
         return
-    dx, dy = domain.dx, domain.dy
     from matplotlib.patches import Rectangle
-    solid = domain.solid
+    xf      = domain.x_face
+    yf      = domain.y_face
+    dx_arr  = domain.dx_arr
+    dy_arr  = domain.dy_arr
+    solid   = domain.solid
     for i in range(domain.nx):
         for j in range(domain.ny):
             if solid[i, j]:
                 ax.add_patch(Rectangle(
-                    (i * dx, j * dy), dx, dy,
+                    (xf[i], yf[j]), dx_arr[i], dy_arr[j],
                     facecolor='grey', edgecolor='none', alpha=0.85,
                 ))

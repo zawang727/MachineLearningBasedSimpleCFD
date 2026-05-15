@@ -1,21 +1,25 @@
 from __future__ import annotations
 import numpy as np
 from .domain import Domain as _Domain2D
+from .domain import _as_spacing, _scalar_summary
 
 
 class Domain3D:
     """
     3-D rectangular domain for MAC-grid NS solver.
 
-    Grid: nx × ny × nz cells.
+    Grid: nx × ny × nz cells.  All cells are real fluid; walls live on the
+    bounding u / v / w faces.
       p[i,j,k]   pressure at cell centre         (nx, ny, nz)
       u[i,j,k]   x-velocity at right x-face      (nx+1, ny, nz)
       v[i,j,k]   y-velocity at top  y-face       (nx, ny+1, nz)
       w[i,j,k]   z-velocity at front z-face      (nx, ny, nz+1)
 
-    Ghost rows:
-      j=0, j=ny-1 are ghost y-rows in u and w (top/bottom no-slip walls).
-      k=0, k=nz-1 are ghost z-layers in u and v (front/back no-slip walls).
+    Spacing: dx / dy / dz may be scalars (uniform mesh) or 1-D arrays of
+    shape (nx,) / (ny,) / (nz,) for stretched meshes.  Per-axis spacing
+    arrays (`dx_arr`, `dy_arr`, `dz_arr`) and cell / face coordinate arrays
+    (`x_cell`, `y_cell`, `z_cell`, `x_face`, `y_face`, `z_face`) are always
+    exposed so downstream code does not have to special-case uniformity.
 
     ASCII formats
     -------------
@@ -33,13 +37,20 @@ class Domain3D:
     def __init__(
         self,
         nx: int, ny: int, nz: int,
-        dx: float, dy: float, dz: float,
+        dx: 'float | np.ndarray',
+        dy: 'float | np.ndarray',
+        dz: 'float | np.ndarray',
         solid: np.ndarray,     # (nx, ny, nz) bool
         bc_type: dict,         # 'left'/'right'/'bottom'/'top'/'front'/'back'
         bc_values: dict,
     ) -> None:
         self.nx, self.ny, self.nz = nx, ny, nz
-        self.dx, self.dy, self.dz = dx, dy, dz
+        self.dx_arr = _as_spacing(dx, nx, 'dx')
+        self.dy_arr = _as_spacing(dy, ny, 'dy')
+        self.dz_arr = _as_spacing(dz, nz, 'dz')
+        self.dx     = _scalar_summary(self.dx_arr)
+        self.dy     = _scalar_summary(self.dy_arr)
+        self.dz     = _scalar_summary(self.dz_arr)
         self.solid     = solid.astype(bool)
         self.bc_type   = bc_type
         self.bc_values = bc_values
@@ -52,6 +63,47 @@ class Domain3D:
         if bc_type.get('left')   == 'inlet': self.inlet_u_map[0,  :, :] = u_in
         if bc_type.get('top')    == 'lid':   self.lid_u_map[:,  -1, :] = lid_u
         if bc_type.get('bottom') == 'lid':   self.lid_u_map[:,   0, :] = lid_u
+
+    # ------------------------------------------------------------------
+    # Mesh geometry
+    @property
+    def x_face(self) -> np.ndarray:
+        return np.concatenate(([0.0], np.cumsum(self.dx_arr)))
+
+    @property
+    def y_face(self) -> np.ndarray:
+        return np.concatenate(([0.0], np.cumsum(self.dy_arr)))
+
+    @property
+    def z_face(self) -> np.ndarray:
+        return np.concatenate(([0.0], np.cumsum(self.dz_arr)))
+
+    @property
+    def x_cell(self) -> np.ndarray:
+        xf = self.x_face
+        return 0.5 * (xf[:-1] + xf[1:])
+
+    @property
+    def y_cell(self) -> np.ndarray:
+        yf = self.y_face
+        return 0.5 * (yf[:-1] + yf[1:])
+
+    @property
+    def z_cell(self) -> np.ndarray:
+        zf = self.z_face
+        return 0.5 * (zf[:-1] + zf[1:])
+
+    @property
+    def Lx(self) -> float:
+        return float(self.dx_arr.sum())
+
+    @property
+    def Ly(self) -> float:
+        return float(self.dy_arr.sum())
+
+    @property
+    def Lz(self) -> float:
+        return float(self.dz_arr.sum())
 
     # ------------------------------------------------------------------
     @classmethod
