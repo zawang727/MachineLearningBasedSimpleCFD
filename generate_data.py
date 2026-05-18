@@ -43,12 +43,18 @@ def _encode_input(domain) -> np.ndarray:
     return np.stack([chi.T, inlet_u.T, lid_u.T, dx_map, dy_map], axis=0)
 
 
-def _cylinder_in_square(Re: float, nx: int, ny: int, U_inf: float = 1.0,
+def _cylinder_in_square(Re: float, nx: int, ny: int,
+                         cx: float = 0.3, cy: float = 0.5, r: float = 0.1,
+                         U_inf: float = 1.0,
                          out_dir: str = "results", quiet: bool = True):
-    """Cylinder in a square inlet-outlet channel; same nx × ny as the rest."""
+    """Cylinder in a square inlet-outlet channel; same nx × ny as the rest.
+
+    `cx`, `cy`, `r` set the cylinder placement / size — vary them across
+    samples to give the surrogate something to generalise over.
+    """
     L  = 1.0
-    D  = 0.2                       # cylinder diameter
-    nu = U_inf * D / Re            # Re = U_inf · D / nu
+    D  = 2.0 * r                    # cylinder diameter
+    nu = U_inf * D / Re             # Re = U_inf · D / nu
 
     top    = '#' * (nx + 2)
     fluid  = '>' + ' ' * nx + '<'
@@ -59,7 +65,7 @@ nu:      {nu}
 inlet_u: {U_inf}
 Lx:      {L}
 Ly:      {L}
-shape:   circle cx=0.3 cy=0.5 r=0.1 epsilon=2
+shape:   circle cx={cx} cy={cy} r={r} epsilon=2
 ---
 {ascii_map}
 """
@@ -133,11 +139,20 @@ def generate(
         count += 1
 
     # ---- Cylinder in square channel (curved geometry, fractional χ) ----
-    Re_cyl = [20, 40, 80]
-    for Re in Re_cyl[:n_per_case]:
-        print(f"\n[generate] Cylinder flow  Re={Re}")
-        state = _cylinder_in_square(Re=Re, nx=nx, ny=ny, out_dir=out_dir, quiet=True)
-        _record(state, 'cylinder_flow', {'Re': Re})
+    # Varied position / radius / Re so the surrogate sees a real geometry mix.
+    cylinder_configs = [
+        {'Re': 20, 'cx': 0.30, 'cy': 0.50, 'r': 0.10},
+        {'Re': 40, 'cx': 0.30, 'cy': 0.50, 'r': 0.10},
+        {'Re': 80, 'cx': 0.30, 'cy': 0.50, 'r': 0.10},
+        {'Re': 40, 'cx': 0.50, 'cy': 0.40, 'r': 0.08},
+        {'Re': 40, 'cx': 0.40, 'cy': 0.60, 'r': 0.12},
+    ]
+    for cfg in cylinder_configs:
+        print(f"\n[generate] Cylinder flow  Re={cfg['Re']}  "
+              f"cx={cfg['cx']} cy={cfg['cy']} r={cfg['r']}")
+        state = _cylinder_in_square(nx=nx, ny=ny, out_dir=out_dir, quiet=True,
+                                     **cfg)
+        _record(state, 'cylinder_flow', cfg)
 
     inputs  = np.stack(all_in,  axis=0)   # (N, 3, ny, nx)
     outputs = np.stack(all_out, axis=0)
