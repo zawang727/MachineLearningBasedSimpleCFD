@@ -1,0 +1,44 @@
+# Flow past a 3-D circular cylinder in a channel, Re = 40.
+#
+# The `circle` shape from cfd.shapes lifts to 3-D by default as an
+# infinite extrusion in z, so the same one-line geometry that produces
+# the 2-D cylinder makes a finite-length cylinder spanning the duct here.
+#
+# Run:
+#   python cases/run.py cases/cylinder_flow_3d.cfd --duration 15
+
+rho:     1.0
+nu:      0.005          # Re = U_inf * D / nu = 1 * 0.2 / 0.005 = 40
+inlet_u: 1.0
+
+Lx:      3.0
+Ly:      1.0
+Lz:      0.6
+nz:      12
+x_axis:  uniform
+y_axis:  uniform
+z_axis:  uniform
+
+shape:   circle cx=0.8 cy=0.5 r=0.1 epsilon=2
+
+---
+##########################################################
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+>                                                        <
+##########################################################

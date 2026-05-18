@@ -168,6 +168,27 @@ class Solver3D:
         self._dy_pcorr    = (0.5 * (dy_arr[:-1] + dy_arr[1:]))[None, :, None]
         self._dz_pcorr    = (0.5 * (dz_arr[:-1] + dz_arr[1:]))[None, None, :]
 
+        # --- volume-penalisation: chi interpolated to u / v / w faces ---
+        chi = self.domain.chi.astype(np.float32)
+        chi_u_face = np.empty((nx + 1, ny, nz), dtype=np.float32)
+        chi_u_face[1:-1, :, :] = 0.5 * (chi[:-1, :, :] + chi[1:, :, :])
+        chi_u_face[0,    :, :] = chi[0,  :, :]
+        chi_u_face[-1,   :, :] = chi[-1, :, :]
+        chi_v_face = np.empty((nx, ny + 1, nz), dtype=np.float32)
+        chi_v_face[:, 1:-1, :] = 0.5 * (chi[:, :-1, :] + chi[:, 1:, :])
+        chi_v_face[:, 0,    :] = chi[:, 0,  :]
+        chi_v_face[:, -1,   :] = chi[:, -1, :]
+        chi_w_face = np.empty((nx, ny, nz + 1), dtype=np.float32)
+        chi_w_face[:, :, 1:-1] = 0.5 * (chi[:, :, :-1] + chi[:, :, 1:])
+        chi_w_face[:, :, 0   ] = chi[:, :, 0]
+        chi_w_face[:, :, -1  ] = chi[:, :, -1]
+        self._u_survive = (1.0 - chi_u_face).astype(np.float64)
+        self._v_survive = (1.0 - chi_v_face).astype(np.float64)
+        self._w_survive = (1.0 - chi_w_face).astype(np.float64)
+        self._has_penalisation = bool(np.any(self._u_survive < 1.0) or
+                                       np.any(self._v_survive < 1.0) or
+                                       np.any(self._w_survive < 1.0))
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -197,16 +218,26 @@ class Solver3D:
         u_star, v_star, w_star = self._advect_diffuse()
         self._apply_bc(u_star, v_star, w_star)
         self._mask_solid(u_star, v_star, w_star)
+        self._penalise(u_star, v_star, w_star)
 
         p_new = self._solve_pressure(u_star, v_star, w_star)
         u_new, v_new, w_new = self._correct_velocity(u_star, v_star, w_star, p_new)
         self._apply_bc(u_new, v_new, w_new)
         self._mask_solid(u_new, v_new, w_new)
+        self._penalise(u_new, v_new, w_new)
 
         self.u[:] = u_new
         self.v[:] = v_new
         self.w[:] = w_new
         self.p[:] = p_new
+
+    def _penalise(self, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> None:
+        """3-D mirror of Solver._penalise — `u ← (1 − χ) · u` per face."""
+        if not self._has_penalisation:
+            return
+        u *= self._u_survive
+        v *= self._v_survive
+        w *= self._w_survive
 
     # ------------------------------------------------------------------ #
     # Advection + diffusion  (first-order upwind advection, central diffusion)

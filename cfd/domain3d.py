@@ -3,6 +3,7 @@ import numpy as np
 from .domain import Domain as _Domain2D
 from .domain import (_as_spacing, _scalar_summary,
                      _parse_axis, _parse_mesh_ascii, tanh_spacing)
+from .shapes import Shape, parse_shape_spec
 
 
 class Domain3D:
@@ -41,7 +42,7 @@ class Domain3D:
         dx: 'float | np.ndarray',
         dy: 'float | np.ndarray',
         dz: 'float | np.ndarray',
-        solid: np.ndarray,     # (nx, ny, nz) bool
+        solid: np.ndarray,     # (nx, ny, nz) bool or float-in-[0,1]
         bc_type: dict,         # 'left'/'right'/'bottom'/'top'/'front'/'back'
         bc_values: dict,
     ) -> None:
@@ -52,7 +53,15 @@ class Domain3D:
         self.dx     = _scalar_summary(self.dx_arr)
         self.dy     = _scalar_summary(self.dy_arr)
         self.dz     = _scalar_summary(self.dz_arr)
-        self.solid     = solid.astype(bool)
+        # `solid` accepts either bool (hard mask) or float χ ∈ [0, 1]
+        # (smooth volume fraction); see Domain.__init__ for the 2-D analogue.
+        solid_arr = np.asarray(solid)
+        if solid_arr.dtype == bool:
+            self.chi   = solid_arr.astype(np.float32)
+            self.solid = solid_arr
+        else:
+            self.chi   = solid_arr.astype(np.float32).clip(0.0, 1.0)
+            self.solid = (self.chi >= 0.5)
         self.bc_type   = bc_type
         self.bc_values = bc_values
 
@@ -246,6 +255,7 @@ class Domain3D:
         y_axis = 'uniform'
         z_axis = 'uniform'
         nz     = None
+        shapes: list[Shape] = []
 
         for raw in header_text.splitlines():
             line = raw.split('#', 1)[0].strip()
@@ -264,6 +274,7 @@ class Domain3D:
             elif key == 'x_axis': x_axis = val
             elif key == 'y_axis': y_axis = val
             elif key == 'z_axis': z_axis = val
+            elif key == 'shape':  shapes.append(parse_shape_spec(val))
             else:
                 raise ValueError(f"Unknown header key: {key!r}")
 
@@ -275,15 +286,49 @@ class Domain3D:
         dy_arr = _parse_axis(y_axis, ny, Ly)
         dz_arr = _parse_axis(z_axis, nz, Lz)
 
-        # Extrude the 2-D solid mask uniformly in z, then default the front /
-        # back walls to no-slip (they are not encoded in a 2-D ASCII map).
-        solid3d = np.repeat(solid2d[:, :, None], nz, axis=2)
+        # Extrude the 2-D solid mask uniformly in z.  Front / back walls are
+        # not encoded in a 2-D ASCII map; default both to no-slip.
+        solid_bool = np.repeat(solid2d[:, :, None], nz, axis=2)
         bc_type = dict(bc_type)
         bc_type.setdefault('front', 'no_slip')
         bc_type.setdefault('back',  'no_slip')
 
+        # OR shape contributions in.  If any shape carries epsilon > 0 we
+        # promote the solid mask to a continuous χ field so the solver's
+        # penalisation step gives smooth walls.
+        if shapes:
+            xc = np.concatenate(([0.0], np.cumsum(dx_arr)))
+            yc = np.concatenate(([0.0], np.cumsum(dy_arr)))
+            zc = np.concatenate(([0.0], np.cumsum(dz_arr)))
+            xc = 0.5 * (xc[:-1] + xc[1:])
+            yc = 0.5 * (yc[:-1] + yc[1:])
+            zc = 0.5 * (zc[:-1] + zc[1:])
+            X, Y, Z = np.meshgrid(xc, yc, zc, indexing='ij')   # (nx, ny, nz)
+            h_min = float(min(dx_arr.min(), dy_arr.min(), dz_arr.min()))
+
+            any_smooth = any(getattr(s, 'epsilon', 0.0) > 0 for s in shapes)
+            if any_smooth:
+                chi_field = solid_bool.astype(np.float32)
+                for shape in shapes:
+                    field = shape.chi_at_3d(X, Y, Z, h_min)
+                    if shape.kind == 'solid':
+                        chi_field = np.maximum(chi_field, field)
+                    else:
+                        chi_field = np.minimum(chi_field, 1.0 - field)
+                solid_out = chi_field            # constructor accepts float χ
+            else:
+                solid_out = solid_bool.copy()
+                for shape in shapes:
+                    mask = shape.signed_distance_3d(X, Y, Z) <= 0.0
+                    if shape.kind == 'solid':
+                        solid_out |= mask
+                    else:
+                        solid_out &= ~mask
+        else:
+            solid_out = solid_bool
+
         return cls(nx, ny, nz, dx_arr, dy_arr, dz_arr,
-                   solid3d, bc_type, params)
+                   solid_out, bc_type, params)
 
     @classmethod
     def from_file(cls, path: str) -> 'Domain3D':

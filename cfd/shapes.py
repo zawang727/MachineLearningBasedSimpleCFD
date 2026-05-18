@@ -17,9 +17,11 @@ import numpy as np
 @dataclass
 class Shape:
     """
-    Base class.  Subclasses implement `signed_distance(X, Y)` (positive
-    outside the body, negative inside) so callers can build either a hard
-    mask (`inside`) or a smooth volume fraction `chi ∈ [0, 1]` (`chi_at`).
+    Base class.  Subclasses implement at least one of `signed_distance`
+    (2-D) or `signed_distance_3d` (3-D) — positive outside the body,
+    negative inside.  The default `signed_distance_3d` is "lift the 2-D
+    SDF" (z-axis extrusion), which makes a 2-D Circle automatically act
+    as an infinite cylinder in z when used in a 3-D Domain.
 
     Attributes:
       kind     'solid' or 'fluid' — adds or carves out, respectively
@@ -32,14 +34,27 @@ class Shape:
     epsilon: float = 0.0
 
     def signed_distance(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"{type(self).__name__} has no 2-D signed_distance — use it in a Domain3D")
+
+    def signed_distance_3d(self, X: np.ndarray, Y: np.ndarray,
+                            Z: np.ndarray) -> np.ndarray:
+        """Default: 2-D SDF lifted to 3-D (infinite extrusion in z)."""
+        return self.signed_distance(X, Y)
 
     def inside(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
         return self.signed_distance(X, Y) <= 0.0
 
     def chi_at(self, X: np.ndarray, Y: np.ndarray, h: float) -> np.ndarray:
-        """Volume fraction inside this shape (1 = solid, 0 = fluid)."""
-        phi = self.signed_distance(X, Y)
+        """Volume fraction inside this shape (1 = solid, 0 = fluid) in 2-D."""
+        return self._chi_from_phi(self.signed_distance(X, Y), h)
+
+    def chi_at_3d(self, X: np.ndarray, Y: np.ndarray, Z: np.ndarray,
+                   h: float) -> np.ndarray:
+        """Volume fraction inside this shape in 3-D."""
+        return self._chi_from_phi(self.signed_distance_3d(X, Y, Z), h)
+
+    def _chi_from_phi(self, phi: np.ndarray, h: float) -> np.ndarray:
         if self.epsilon <= 0.0:
             return (phi <= 0.0).astype(np.float32)
         scale = max(self.epsilon * h, 1e-12)
@@ -72,11 +87,49 @@ class Rectangle(Shape):
         return outside + inside
 
 
+@dataclass
+class Sphere(Shape):
+    cx: float = 0.0
+    cy: float = 0.0
+    cz: float = 0.0
+    r:  float = 0.1
+
+    def signed_distance_3d(self, X: np.ndarray, Y: np.ndarray,
+                            Z: np.ndarray) -> np.ndarray:
+        return (np.sqrt((X - self.cx) ** 2
+                       + (Y - self.cy) ** 2
+                       + (Z - self.cz) ** 2)
+                - self.r)
+
+
+@dataclass
+class Box(Shape):
+    x0: float = 0.0
+    x1: float = 0.0
+    y0: float = 0.0
+    y1: float = 0.0
+    z0: float = 0.0
+    z1: float = 0.0
+
+    def signed_distance_3d(self, X: np.ndarray, Y: np.ndarray,
+                            Z: np.ndarray) -> np.ndarray:
+        dx = np.maximum(self.x0 - X, X - self.x1)
+        dy = np.maximum(self.y0 - Y, Y - self.y1)
+        dz = np.maximum(self.z0 - Z, Z - self.z1)
+        outside = np.sqrt(np.maximum(dx, 0) ** 2
+                          + np.maximum(dy, 0) ** 2
+                          + np.maximum(dz, 0) ** 2)
+        inside  = np.minimum(np.maximum(np.maximum(dx, dy), dz), 0.0)
+        return outside + inside
+
+
 # Names recognised by the `.cfd` parser.  Each entry maps a shape keyword to
 # (class, required-keys, optional-keys).
 SHAPE_REGISTRY = {
-    'circle': (Circle,    ('cx', 'cy', 'r'),         ()),
-    'rect':   (Rectangle, ('x0', 'x1', 'y0', 'y1'),  ()),
+    'circle': (Circle,    ('cx', 'cy', 'r'),                       ()),
+    'rect':   (Rectangle, ('x0', 'x1', 'y0', 'y1'),                ()),
+    'sphere': (Sphere,    ('cx', 'cy', 'cz', 'r'),                 ()),
+    'box':    (Box,       ('x0', 'x1', 'y0', 'y1', 'z0', 'z1'),    ()),
 }
 
 
