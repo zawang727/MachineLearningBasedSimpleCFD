@@ -224,10 +224,14 @@ Recirculation wake downstream of block. Vortex shedding at higher Re.
 python generate_data.py --n-per-case 3 --output data.npz
 ```
 
-Each sample: (obstacle mask, inlet BC map, lid BC map, dx/Lx map, dy/Ly map)
-→ (u, v, p) steady-state fields.  The two trailing channels make the
+Each sample: (χ, inlet BC map, lid BC map, dx/Lx map, dy/Ly map)
+→ (u, v, p) steady-state fields.  Channel 0 is the volume fraction
+χ ∈ [0, 1] (= boolean solid mask for hard-edged cases, continuous for
+shape-defined geometry like a cylinder).  Channels 3–4 make the
 surrogate mesh-aware so the same network can train on uniform and
-stretched grids; in 3D the input is 6-channel (adds dz/Lz).
+stretched grids; in 3D the input is 6-channel (adds dz/Lz).  The
+dataset now includes a cylinder-in-channel case demonstrating curved
+geometry training.
 
 ### Train
 

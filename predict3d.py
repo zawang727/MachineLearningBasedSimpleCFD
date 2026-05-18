@@ -54,7 +54,7 @@ def _decode_domain3d(input_tensor: np.ndarray, meta_str: str,
                      nx: int, ny: int, nz: int) -> Domain3D:
     """Reconstruct a minimal Domain3D from the input encoding + metadata.
 
-    Input channels: 0=solid, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly, 5=dz/Lz.
+    Input channels: 0=χ, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly, 5=dz/Lz.
     """
     meta = json.loads(meta_str)
     case = meta.get('case', 'unknown')
@@ -62,9 +62,10 @@ def _decode_domain3d(input_tensor: np.ndarray, meta_str: str,
     Lx   = float(meta.get('Lx', 1.0))
     Ly   = float(meta.get('Ly', 1.0))
     Lz   = float(meta.get('Lz', 1.0))
+    nu   = float(meta.get('nu', 1.0 / Re))
 
     # input channels in (nz, ny, nx) → transpose to (nx, ny, nz)
-    solid     = input_tensor[0].T > 0.5
+    chi       = input_tensor[0].T.astype(np.float32)
     inlet_u_val = float(input_tensor[1].max())
     lid_u_val   = float(input_tensor[2].max())
 
@@ -88,26 +89,26 @@ def _decode_domain3d(input_tensor: np.ndarray, meta_str: str,
             'bottom': 'no_slip', 'top': 'lid',
             'front': 'no_slip', 'back': 'no_slip',
         }
-        bc_values = {'lid_u': lid_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
+        bc_values = {'lid_u': lid_u_val, 'rho': 1.0, 'nu': nu}
     elif case == 'channel_flow_3d':
         bc_type = {
             'left': 'inlet', 'right': 'outlet',
             'bottom': 'no_slip', 'top': 'no_slip',
             'front': 'no_slip', 'back': 'no_slip',
         }
-        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
+        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': nu}
     else:
         bc_type = {
             'left': 'inlet', 'right': 'outlet',
             'bottom': 'no_slip', 'top': 'no_slip',
             'front': 'no_slip', 'back': 'no_slip',
         }
-        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
+        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': nu}
 
     return Domain3D(
         nx=nx, ny=ny, nz=nz,
         dx=dx, dy=dy, dz=dz,
-        solid=solid,
+        solid=chi,
         bc_type=bc_type,
         bc_values=bc_values,
     )

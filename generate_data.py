@@ -1,14 +1,16 @@
 """
-Generate CFD training dataset by running all three cases at varied Re and geometry.
+Generate CFD training dataset by running every supported case at varied
+Re and geometry.
 
 Saves a .npz file with:
-  inputs  (N, 5, ny, nx)  — solid, inlet_u, lid_u, dx/Lx, dy/Ly  (mesh-aware)
+  inputs  (N, 5, ny, nx)  — chi, inlet_u, lid_u, dx/Lx, dy/Ly  (mesh-aware
+                            + obstacle-aware)
   outputs (N, 3, ny, nx)  — u_cell, v_cell, pressure
   meta    (N,)            — JSON string per sample (case, Re, ...)
 
-Channels 3-4 carry per-cell spacing normalised by the total domain length so
-the surrogate can resolve stretched grids; on a uniform mesh they are
-constant maps equal to 1/nx and 1/ny respectively.
+Channel 0 is the volume-fraction χ ∈ [0, 1] (= boolean solid mask for the
+hard cases, continuous for shape-defined geometry like the cylinder).
+Channels 3-4 are per-cell spacings normalised by total domain length.
 """
 from __future__ import annotations
 import argparse
@@ -16,6 +18,7 @@ import json
 import os
 import numpy as np
 
+from cfd import Domain, Solver, Material
 from cases import lid_driven_cavity, channel_flow, flow_around_block
 
 
@@ -23,13 +26,13 @@ from cases import lid_driven_cavity, channel_flow, flow_around_block
 NX_DEFAULT = 64
 NY_DEFAULT = 64
 
-INPUT_CHANNELS = 5     # solid, inlet_u, lid_u, dx/Lx, dy/Ly
+INPUT_CHANNELS = 5     # chi, inlet_u, lid_u, dx/Lx, dy/Ly
 
 
 def _encode_input(domain) -> np.ndarray:
     """Build 5-channel (5, ny, nx) input tensor from Domain."""
     nx, ny  = domain.nx, domain.ny
-    solid   = domain.solid.astype(np.float32)
+    chi     = domain.chi.astype(np.float32)             # (nx, ny), in [0, 1]
     inlet_u = domain.inlet_u_map.astype(np.float32)
     lid_u   = domain.lid_u_map.astype(np.float32)
     # Per-cell spacings normalised by total domain length → dimensionless.
@@ -37,7 +40,35 @@ def _encode_input(domain) -> np.ndarray:
     dy_norm = (domain.dy_arr / domain.Ly).astype(np.float32)        # (ny,)
     dx_map  = np.broadcast_to(dx_norm[None, :], (ny, nx)).copy()    # (ny, nx)
     dy_map  = np.broadcast_to(dy_norm[:, None], (ny, nx)).copy()    # (ny, nx)
-    return np.stack([solid.T, inlet_u.T, lid_u.T, dx_map, dy_map], axis=0)
+    return np.stack([chi.T, inlet_u.T, lid_u.T, dx_map, dy_map], axis=0)
+
+
+def _cylinder_in_square(Re: float, nx: int, ny: int, U_inf: float = 1.0,
+                         out_dir: str = "results", quiet: bool = True):
+    """Cylinder in a square inlet-outlet channel; same nx × ny as the rest."""
+    L  = 1.0
+    D  = 0.2                       # cylinder diameter
+    nu = U_inf * D / Re            # Re = U_inf · D / nu
+
+    top    = '#' * (nx + 2)
+    fluid  = '>' + ' ' * nx + '<'
+    ascii_map = "\n".join([top] + [fluid] * ny + [top])
+    spec = f"""
+rho:     1.0
+nu:      {nu}
+inlet_u: {U_inf}
+Lx:      {L}
+Ly:      {L}
+shape:   circle cx=0.3 cy=0.5 r=0.1 epsilon=2
+---
+{ascii_map}
+"""
+    domain   = Domain.from_text(spec)
+    material = Material(rho=1.0, nu=nu)
+    solver   = Solver(domain, material)
+    duration = 12.0 * L / U_inf
+    return solver.run(duration, tol=1e-6,
+                       print_every=100000 if quiet else 500)
 
 
 def _encode_output(state) -> np.ndarray:
@@ -59,10 +90,12 @@ def generate(
     all_in, all_out, all_meta = [], [], []
 
     def _record(state, case_name: str, extra: dict | None = None):
+        bcv = state.domain.bc_values
         meta_obj = {
             'case': case_name,
             'Lx':   float(state.domain.Lx),
             'Ly':   float(state.domain.Ly),
+            'nu':   float(bcv.get('nu', 0.01)),
         }
         if extra:
             meta_obj.update(extra)
@@ -98,6 +131,13 @@ def generate(
         state = _resample_state(state, nx, ny)
         _record(state, 'flow_around_block', {'Re': Re, 'block_y': by})
         count += 1
+
+    # ---- Cylinder in square channel (curved geometry, fractional χ) ----
+    Re_cyl = [20, 40, 80]
+    for Re in Re_cyl[:n_per_case]:
+        print(f"\n[generate] Cylinder flow  Re={Re}")
+        state = _cylinder_in_square(Re=Re, nx=nx, ny=ny, out_dir=out_dir, quiet=True)
+        _record(state, 'cylinder_flow', {'Re': Re})
 
     inputs  = np.stack(all_in,  axis=0)   # (N, 3, ny, nx)
     outputs = np.stack(all_out, axis=0)

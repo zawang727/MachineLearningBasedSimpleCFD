@@ -38,15 +38,18 @@ def _decode_domain(input_tensor: np.ndarray, meta_str: str,
                    nx: int, ny: int) -> Domain:
     """Reconstruct a minimal Domain from the input encoding + metadata.
 
-    Input channels: 0=solid, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly.
+    Input channels: 0=χ, 1=inlet_u, 2=lid_u, 3=dx/Lx, 4=dy/Ly.
     """
     meta = json.loads(meta_str)
     case = meta.get('case', 'unknown')
     Re   = meta.get('Re', 100.0)
     Lx   = float(meta.get('Lx', 1.0))
     Ly   = float(meta.get('Ly', 1.0))
+    nu   = float(meta.get('nu', 1.0 / Re))
 
-    solid = input_tensor[0].T > 0.5   # (nx, ny)
+    # Channel 0 is now a continuous χ ∈ [0, 1]; the Domain constructor
+    # accepts it directly (binary input still works for the legacy cases).
+    chi = input_tensor[0].T.astype(np.float32)             # (nx, ny)
     inlet_u_val = float(input_tensor[1].max())
     lid_u_val   = float(input_tensor[2].max())
 
@@ -64,18 +67,18 @@ def _decode_domain(input_tensor: np.ndarray, meta_str: str,
     if case == 'lid_driven_cavity':
         bc_type = {'left': 'no_slip', 'right': 'no_slip',
                    'bottom': 'no_slip', 'top': 'lid'}
-        bc_values = {'lid_u': lid_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
+        bc_values = {'lid_u': lid_u_val, 'rho': 1.0, 'nu': nu}
     elif case == 'channel_flow':
         bc_type = {'left': 'inlet', 'right': 'outlet',
                    'bottom': 'no_slip', 'top': 'no_slip'}
-        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
-    else:
+        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': nu}
+    else:    # flow_around_block, cylinder_flow, etc.
         bc_type = {'left': 'inlet', 'right': 'outlet',
                    'bottom': 'no_slip', 'top': 'no_slip'}
-        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': 1.0 / Re}
+        bc_values = {'inlet_u': inlet_u_val, 'rho': 1.0, 'nu': nu}
 
     return Domain(nx=nx, ny=ny, dx=dx_arr, dy=dy_arr,
-                  solid=solid, bc_type=bc_type, bc_values=bc_values)
+                  solid=chi, bc_type=bc_type, bc_values=bc_values)
 
 
 def predict(
