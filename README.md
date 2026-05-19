@@ -321,7 +321,13 @@ approach used by AMR codes (Basilisk, AMReX) for airfoils, cylinders, hulls.
   input channels.
 - **Cost**: ~3–4 weeks. Adds new test cases (flow over cylinder, NACA).
 
-### Stage 3 — Unstructured finite-volume (hex / tetra / mixed)
+### Stage 3 — Unstructured finite-volume (hex / tetra / mixed) — *in progress (Phase 3a)*
+
+See [STAGE3_PLAN.md](STAGE3_PLAN.md) for the full multi-session
+breakdown of Phase 3a (mesh + first-order FV — landed), 3b (non-
+orthogonal correction → second-order), 3c (general polyhedra), 3d
+(Gmsh I/O), 3e (steady Stokes), 3f (transient NS), 3g (3-D),
+3h (graph-NN ML surrogate).
 The architectural break. Replace `(nx, ny, nz)` arrays with cell, face, and
 node tables. Fluxes are computed face-by-face. Pressure projection becomes
 a general sparse system (CG + algebraic multigrid, not LU).
