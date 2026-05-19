@@ -7,14 +7,20 @@ a working improvement.
 
 ## Where we are
 
-- **Phase 3a** ✅ landed (this commit): mesh data structures
-  (`UnstructuredMesh2D`), `rect_triangulation` generator, basic
-  cell-centred FV Poisson assembly (`assemble_poisson` / `solve_poisson`)
-  and a validation case (`stage3_poisson_demo.py`).  The stencil is
-  first-order on non-orthogonal triangle meshes and bottoms out at ~5%
-  L² error — adequate to prove the plumbing, insufficient for production.
+- **Phase 3a** ✅ landed: mesh data structures (`UnstructuredMesh2D`),
+  `rect_triangulation` generator, first-order FV Poisson assembly
+  (`assemble_poisson` / `solve_poisson`).  Single-pair stencil — bottoms
+  out at ~5 % L² error on non-orthogonal triangle meshes.
 
-- **Phase 3b–3f** ahead.
+- **Phase 3b** ✅ landed: Green-Gauss cell gradient
+  (`green_gauss_gradient`) + over-relaxed non-orthogonal correction
+  applied as a deferred RHS update inside an outer fixed-point loop
+  (`solve_poisson_2nd_order`).  Convergence rate on the sin·sin test
+  case is now 1.91, 1.96, 1.98 over n ∈ {32, 64, 128} — **second-order
+  accuracy restored**.  At n=128 the L² error drops to 2.1e-5, ~2600×
+  smaller than the first-order plateau.
+
+- **Phase 3c–3h** ahead.
 
 ## Why this is multi-session
 

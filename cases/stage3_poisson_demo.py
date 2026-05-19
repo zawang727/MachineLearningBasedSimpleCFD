@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from cfd.mesh        import rect_triangulation
-from cfd.fv_poisson  import solve_poisson
+from cfd.fv_poisson  import solve_poisson, solve_poisson_2nd_order
 
 
 def analytical(xy: np.ndarray) -> np.ndarray:
@@ -50,57 +50,77 @@ def all_walls_dirichlet(face_centroid, face_normal) -> dict:
     return {'type': 'dirichlet', 'value': 0.0}
 
 
+def _refinement_table(label, solver_call, sizes):
+    """Run `solver_call(mesh)` at each n in sizes and report L² + rate."""
+    print(f"\n{label}")
+    print(f"  {'n':>4} {'cells':>7} {'L2_err':>10} {'rate':>6}")
+    out = []
+    prev_err = prev_h = None
+    for n in sizes:
+        mesh = rect_triangulation(n, n)
+        p    = solver_call(mesh)
+        ref  = analytical(mesh.cell_centroids)
+        l2_err = float(np.sqrt(np.sum((p - ref) ** 2 * mesh.cell_areas)))
+        h      = 1.0 / n
+        rate   = ('' if prev_err is None
+                  else f"{np.log(prev_err / l2_err) / np.log(prev_h / h):.2f}")
+        print(f"  {n:>4} {mesh.n_cells:>7d} {l2_err:>10.4e} {rate:>6}")
+        prev_err, prev_h = l2_err, h
+        out.append((n, mesh, p, ref, l2_err))
+    return out
+
+
 def run(out_dir: str = "results"):
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"{'n':>4} {'cells':>7} {'L2_err':>10} {'rate':>6}")
-    prev_err = None
-    prev_h   = None
-    results  = []
-    for n in (16, 32, 64):
-        mesh = rect_triangulation(n, n)
-        p    = solve_poisson(mesh, source, all_walls_dirichlet)
-        ref  = analytical(mesh.cell_centroids)
+    sizes = (16, 32, 64, 128)
+    first  = _refinement_table(
+        'First-order FV  (single-pair stencil, no correction)',
+        lambda m: solve_poisson(m, source, all_walls_dirichlet),
+        sizes)
+    second = _refinement_table(
+        'Second-order FV  (Green-Gauss + over-relaxed non-orth correction)',
+        lambda m: solve_poisson_2nd_order(m, source, all_walls_dirichlet,
+                                           max_iters=20, tol=1e-10)[0],
+        sizes)
 
-        # L² error weighted by cell area.
-        l2_err = np.sqrt(np.sum((p - ref) ** 2 * mesh.cell_areas))
+    # ---------- Refinement plot (log-log) ----------
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 
-        h = 1.0 / n
-        rate = '' if prev_err is None else f"{np.log(prev_err / l2_err) / np.log(prev_h / h):.2f}"
-        print(f"{n:>4} {mesh.n_cells:>7d} {l2_err:>10.4e} {rate:>6}")
-        prev_err = l2_err
-        prev_h   = h
-        results.append((mesh, p, ref, l2_err))
+    hs    = np.array([1.0 / n for n, *_ in first])
+    err_1 = np.array([row[-1] for row in first])
+    err_2 = np.array([row[-1] for row in second])
 
-    # ----- Plot the finest resolution -----
-    mesh, p, ref, _ = results[-1]
+    ax = axes[0]
+    ax.loglog(hs, err_1, 'o-', label='First-order FV')
+    ax.loglog(hs, err_2, 's-', label='Second-order FV (Green-Gauss + correction)')
+    # Reference slopes
+    h_ref = hs
+    ax.loglog(h_ref, 0.6 * h_ref ** 1,  'k--', alpha=0.4, label='O(h)  reference')
+    ax.loglog(h_ref, 0.6 * h_ref ** 2,  'k:',  alpha=0.4, label='O(h²) reference')
+    ax.set_xlabel('h = 1/n')
+    ax.set_ylabel(r'$\|p - p_{exact}\|_{L^2}$')
+    ax.set_title('Convergence on rect_triangulation')
+    ax.legend(); ax.grid(True, which='both', alpha=0.3)
+    ax.invert_xaxis()
+
+    # ---------- Field plot — finest mesh, second-order solution ----------
+    _, mesh, p, ref, _ = second[-1]
     nodes = mesh.nodes
     tris  = mesh.cells
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    cf0 = axes[0].tripcolor(nodes[:, 0], nodes[:, 1], tris, p,
-                            shading='flat', cmap='RdBu_r',
-                            vmin=-1.05, vmax=1.05)
-    axes[0].set_title('FV solution p')
-    axes[0].set_aspect('equal'); fig.colorbar(cf0, ax=axes[0])
-
-    cf1 = axes[1].tripcolor(nodes[:, 0], nodes[:, 1], tris, ref,
-                            shading='flat', cmap='RdBu_r',
-                            vmin=-1.05, vmax=1.05)
-    axes[1].set_title('Analytical sin(πx)·sin(πy)')
-    axes[1].set_aspect('equal'); fig.colorbar(cf1, ax=axes[1])
-
+    ax = axes[1]
     err = np.abs(p - ref)
-    cf2 = axes[2].tripcolor(nodes[:, 0], nodes[:, 1], tris, err,
-                            shading='flat', cmap='Reds')
-    axes[2].triplot(nodes[:, 0], nodes[:, 1], tris,
-                    color='black', alpha=0.08, linewidth=0.3)
-    axes[2].set_title('|FV − analytical|  (mesh overlay)')
-    axes[2].set_aspect('equal'); fig.colorbar(cf2, ax=axes[2])
+    cf = ax.tripcolor(nodes[:, 0], nodes[:, 1], tris, err,
+                      shading='flat', cmap='Reds')
+    ax.triplot(nodes[:, 0], nodes[:, 1], tris,
+               color='black', alpha=0.05, linewidth=0.2)
+    fig.colorbar(cf, ax=ax)
+    ax.set_title(f'|second-order − analytical|  (n={int(1 / hs[-1])})')
+    ax.set_aspect('equal')
 
-    fig.suptitle(
-        'Stage 3 sanity check: FV Poisson on a 64×64 triangulated unit square',
-        fontsize=12)
+    fig.suptitle('Stage 3b: FV Poisson convergence  '
+                 '(non-orthogonal correction restores O(h²))',
+                 fontsize=12)
     out = os.path.join(out_dir, 'stage3_poisson_demo.png')
     plt.tight_layout()
     plt.savefig(out, dpi=140, bbox_inches='tight')
